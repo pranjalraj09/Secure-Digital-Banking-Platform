@@ -2,7 +2,7 @@
 
 This project uses the **original uploaded HTML file as `index.html`** so the interface, styling, and in-page React demo logic remain the same as the supplied prototype. Vite is only used to serve the file locally; the UI still loads React, Recharts, Babel, and Tailwind from CDNs as the original HTML did.
 
-> **Demo only:** balances, users, and transactions are fictional and stored in browser memory. This is not connected to a real bank, payment network, backend, or persistent database. Do not enter real financial or personal information.
+> **Demo only:** balances, users, and transactions are fictional and stored in browser memory.
 
 ## Requirements
 - Node.js and npm installed
