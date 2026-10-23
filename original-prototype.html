@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>FINCORE Nexus</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<script>tailwind.config={darkMode:'class',theme:{extend:{colors:{navy:{950:'#071428',900:'#0b1f3a',800:'#10294d',700:'#17356a',600:'#1e4388',500:'#2d5fb8'}}}}}</script>
+<script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prop-types@15.8.1/prop-types.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/react-is@18.3.1/umd/react-is.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/recharts@2.12.7/umd/Recharts.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.25.6/babel.min.js"></script>
+<style>:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;background:#f1f5fa}.dark body{background:#071428}</style>
+</head><body class="text-slate-800 dark:text-slate-100"><div id="root"></div>
+<script type="text/babel">
+const {useState,useMemo,useEffect,useRef,createContext,useContext}=React;
+const RC=window.Recharts;
+const fmt=n=>'₹'+Number(n).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
+const uid=p=>p+'-'+Math.random().toString(36).slice(2,8).toUpperCase();
+const dAgo=d=>new Date(Date.now()-d*864e5).toISOString();
+const dt=s=>new Date(s).toLocaleString('en-IN',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
+const delay=ms=>new Promise(r=>setTimeout(r,ms));
+const cx=(...a)=>a.filter(Boolean).join(' ');
+const P={
+home:<><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></>,
+wallet:<><path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/></>,
+down:<><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></>,up:<><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></>,
+swap:<><path d="m16 3 4 4-4 4M20 7H4M8 21l-4-4 4-4M4 17h16"/></>,list:<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>,
+file:<><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></>,
+user:<><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></>,users:<><circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0M16 4a4 4 0 0 1 0 8M22 21a7 7 0 0 0-5-6.7"/></>,
+sun:<><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></>,
+moon:<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>,menu:<path d="M4 6h16M4 12h16M4 18h16"/>,
+out:<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>,dl:<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>,
+x:<path d="M18 6 6 18M6 6l12 12"/>,check:<path d="M20 6 9 17l-5-5"/>,act:<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>,
+bank:<path d="M3 21h18M5 21V10M19 21V10M9 21V10M15 21V10M2 10l10-7 10 7"/>,search:<><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></>,
+grid:<path d="M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z"/>,plus:<path d="M12 5v14M5 12h14"/>};
+const Ic=({n,c='w-4 h-4'})=><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={c}>{P[n]}</svg>;
+
+/* ---------- seed (all fictional) ---------- */
+const seed=()=>{
+ const users=[
+  {id:'u1',name:'John Snow',email:'demo@fincore.test',password:'Demo@1234',phone:'9876543210',address:'12 Lake View Road, Chennai',role:'customer',status:'active',joined:dAgo(400)},
+  {id:'u2',name:'Arya Stark',email:'arya@fincore.test',password:'Demo@1234',phone:'9988776655',address:'8 Park Street, Kolkata',role:'customer',status:'active',joined:dAgo(120)},
+  {id:'a1',name:'Admin Officer',email:'admin@fincore.test',password:'Admin@1234',phone:'9000000000',address:'FinCore HQ',role:'admin',status:'active',joined:dAgo(900)}];
+ const accounts=[
+  {id:'a-1',no:'FCN1001234501',userId:'u1',type:'Savings',nick:'Primary Savings',balance:84250.5,status:'active',opened:dAgo(390)},
+  {id:'a-2',no:'FCN1001234502',userId:'u1',type:'Current',nick:'Spending',balance:23100,status:'active',opened:dAgo(200)},
+  {id:'a-4',no:'FCN3003456701',userId:'u3',type:'Savings',nick:'Savings',balance:47890,status:'active',opened:dAgo(110)}];
+ const txns=[];const T=(d,type,amt,desc,from,to,status='completed')=>txns.push({id:uid('TXN'),date:dAgo(d),type,amount:amt,desc,from,to,status,note:''});
+ for(let m=0;m<6;m++){const b=m*30;
+  T(b+2,'deposit',55000+m*1500,'Salary credit (demo)',null,'a-1');
+  T(b+4,'withdrawal',18000,'Rent payment',  'a-1',null);
+  T(b+7,'withdrawal',5200+m*300,'Groceries','a-2',null);
+  T(b+9,'withdrawal',2400,'Utilities','a-2',null);
+  T(b+12,'transfer',4000+m*500,'Transfer to Arjun','a-1','a-3');
+  T(b+16,'withdrawal',3100,'Shopping','a-2',null);
+  if(m%2)T(b+20,'deposit',6000,'Freelance payment (demo)',null,'a-2');}
+ T(5,'withdrawal',90000,'ATM withdrawal (declined)','a-2',null,'failed');
+ txns.sort((a,b)=>b.date.localeCompare(a.date));
+ const audit=[{id:uid('AUD'),date:dAgo(2),actor:'Admin Officer',action:'ACCOUNT_REVIEW',detail:'Routine review of dormant accounts'},{id:uid('AUD'),date:dAgo(1),actor:'Priya Sharma',action:'LOGIN',detail:'Customer sign-in'}];
+ return {users,accounts,txns,audit};};
+
+const Ctx=createContext();const useApp=()=>useContext(Ctx);
+
+/* ---------- UI primitives ---------- */
+const Btn=({v='pri',className,busy,children,...p})=><button {...p} disabled={p.disabled||busy} className={cx('inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed',v==='pri'&&'bg-navy-700 text-white hover:bg-navy-600 dark:bg-navy-500 dark:hover:bg-navy-600',v==='out'&&'border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800',v==='dng'&&'bg-red-600 text-white hover:bg-red-700',v==='gho'&&'hover:bg-slate-100 dark:hover:bg-slate-800',className)}>{busy&&<span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"/>}{children}</button>;
+const Card=({className,children})=><div className={cx('rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700/60 dark:bg-navy-900',className)}>{children}</div>;
+const inp='w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-navy-500 dark:border-slate-600 dark:bg-navy-950';
+const Field=({label,error,children})=><label className="block text-sm"><span className="mb-1 block font-medium text-slate-600 dark:text-slate-300">{label}</span>{children}{error&&<span className="mt-1 block text-xs text-red-600 dark:text-red-400">{error}</span>}</label>;
+const Badge=({s})=>{const m={active:'green',completed:'green',failed:'red',frozen:'amber',suspended:'red',pending:'amber'}[s]||'slate';const c={green:'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300',red:'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300',amber:'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300',slate:'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200'}[m];return <span className={cx('rounded-full px-2 py-0.5 text-xs font-medium capitalize',c)}>{s}</span>};
+const Modal=({title,onClose,children})=><div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}><div className="max-h-[90vh] w-full max-w-md overflow-auto rounded-xl bg-white p-6 shadow-xl dark:bg-navy-900" onClick={e=>e.stopPropagation()}><div className="mb-4 flex items-center justify-between"><h3 className="text-lg font-semibold">{title}</h3><button onClick={onClose} aria-label="Close"><Ic n="x"/></button></div>{children}</div></div>;
+const Title=({t,sub,children})=><div className="mb-5 flex flex-wrap items-end justify-between gap-3"><div><h1 className="text-2xl font-semibold text-navy-800 dark:text-white">{t}</h1>{sub&&<p className="text-sm text-slate-500 dark:text-slate-400">{sub}</p>}</div>{children}</div>;
+const Table=({cols,rows,onRow,empty='No records found.'})=><div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead><tr className="border-b border-slate-200 text-xs uppercase text-slate-500 dark:border-slate-700">{cols.map(c=><th key={c} className="whitespace-nowrap px-3 py-2 font-medium">{c}</th>)}</tr></thead><tbody>{rows.length?rows.map((r,i)=><tr key={i} onClick={onRow?()=>onRow(i):undefined} className={cx('border-b border-slate-100 dark:border-slate-800',onRow&&'cursor-pointer hover:bg-slate-50 dark:hover:bg-navy-800')}>{r.map((c,j)=><td key={j} className="whitespace-nowrap px-3 py-2.5">{c}</td>)}</tr>):<tr><td colSpan={cols.length} className="px-3 py-8 text-center text-slate-500">{empty}</td></tr>}</tbody></table></div>;
+
+/* ---------- helpers ---------- */
+const signed=(t,ids)=>(ids.has(t.to)?t.amount:0)-(ids.has(t.from)?t.amount:0);
+const acctName=(db,id)=>{const a=db.accounts.find(x=>x.id===id);return a?`${a.nick||a.type} ••${a.no.slice(-4)}`:'External'};
+const typeLabel={deposit:'Deposit',withdrawal:'Withdrawal',transfer:'Transfer'};
+const SimBanner=()=><div className="bg-amber-400 px-3 py-1.5 text-center text-xs font-semibold text-navy-950">SIMULATION ONLY</div>;
+
+/* ---------- App ---------- */
+function App(){
+ const dbRef=useRef(seed());const [,tick]=useState(0);const db=dbRef.current;const commit=()=>tick(n=>n+1);
+ const [user,setUser]=useState(null);const [page,setPage]=useState('');const [toasts,setToasts]=useState([]);
+ const [dark,setDark]=useState(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches);
+ useEffect(()=>{document.documentElement.classList.toggle('dark',dark)},[dark]);
+ const toast=(msg,kind='ok')=>{const id=Math.random();setToasts(t=>[...t,{id,msg,kind}]);setTimeout(()=>setToasts(t=>t.filter(x=>x.id!==id)),4000)};
+ const log=(actor,action,detail)=>db.audit.unshift({id:uid('AUD'),date:new Date().toISOString(),actor:actor.name,action,detail});
+ const cur=user&&db.users.find(u=>u.id===user.id);
+ const svc={
+  async login(email,pw,portal){await delay(700);const u=db.users.find(u=>u.email===email.trim().toLowerCase()&&u.password===pw);if(!u)throw Error('Invalid email or password.');if(u.role!==portal)throw Error(portal==='admin'?'This account does not have admin access.':'Admins must use the Admin portal.');if(u.status!=='active')throw Error('This profile is suspended. Contact support.');log(u,'LOGIN',portal+' sign-in');commit();return u},
+  async register(f){await delay(800);if(db.users.some(u=>u.email===f.email.toLowerCase()))throw Error('An account with this email already exists.');const u={id:uid('u'),name:f.name,email:f.email.toLowerCase(),password:f.password,phone:f.phone,address:'',role:'customer',status:'active',joined:new Date().toISOString()};db.users.push(u);log(u,'REGISTER','New customer registered');commit();return u},
+  async openAccount(u,type,nick){await delay(700);if(db.accounts.filter(a=>a.userId===u.id).length>=5)throw Error('Maximum of 5 accounts reached.');const a={id:uid('a'),no:'FCN'+Math.floor(1e9+Math.random()*9e9)+'',userId:u.id,type,nick:nick||type+' Account',balance:0,status:'active',opened:new Date().toISOString()};db.accounts.push(a);log(u,'ACCOUNT_OPEN',`${type} ${a.no}`);commit();return a},
+  async deposit(u,id,amt,note){await delay(900);const a=db.accounts.find(x=>x.id===id);if(!a||a.userId!==u.id)throw Error('Account not found.');if(a.status!=='active')throw Error('Account is not active.');if(!(amt>0))throw Error('Amount must be positive.');if(amt>500000)throw Error('Demo deposit limit is ₹5,00,000.');a.balance=+(a.balance+amt).toFixed(2);const t={id:uid('TXN'),date:new Date().toISOString(),type:'deposit',amount:amt,desc:note||'Cash deposit (simulated)',from:null,to:id,status:'completed',note};db.txns.unshift(t);log(u,'DEPOSIT',`${fmt(amt)} → ${a.no}`);commit();return t},
+  async withdraw(u,id,amt,note){await delay(900);const a=db.accounts.find(x=>x.id===id);if(!a||a.userId!==u.id)throw Error('Account not found.');if(a.status!=='active')throw Error('Account is not active.');if(!(amt>0))throw Error('Amount must be positive.');if(amt>a.balance)throw Error('Insufficient balance for this withdrawal.');a.balance=+(a.balance-amt).toFixed(2);const t={id:uid('TXN'),date:new Date().toISOString(),type:'withdrawal',amount:amt,desc:note||'Cash withdrawal (simulated)',from:id,to:null,status:'completed',note};db.txns.unshift(t);log(u,'WITHDRAW',`${fmt(amt)} ← ${a.no}`);commit();return t},
+  async transfer(u,fromId,toNo,amt,note){await delay(1000);const f=db.accounts.find(x=>x.id===fromId);const t=db.accounts.find(x=>x.no===toNo.trim().toUpperCase());if(!f||f.userId!==u.id)throw Error('Sender account not found.');if(!t)throw Error('Recipient account number not found.');if(t.id===f.id)throw Error('Cannot transfer to the same account.');if(f.status!=='active'||t.status!=='active')throw Error('Both accounts must be active.');if(!(amt>0))throw Error('Amount must be positive.');if(amt>f.balance)throw Error('Insufficient balance for this transfer.');f.balance=+(f.balance-amt).toFixed(2);t.balance=+(t.balance+amt).toFixed(2);const x={id:uid('TXN'),date:new Date().toISOString(),type:'transfer',amount:amt,desc:note||'Transfer',from:f.id,to:t.id,status:'completed',note};db.txns.unshift(x);log(u,'TRANSFER',`${fmt(amt)} ${f.no} → ${t.no}`);commit();return x},
+  async updateProfile(u,f){await delay(600);Object.assign(db.users.find(x=>x.id===u.id),f);log(u,'PROFILE_UPDATE','Profile edited');commit()},
+  async setStatus(admin,kind,id,status){await delay(400);const o=(kind==='user'?db.users:db.accounts).find(x=>x.id===id);o.status=status;log(admin,kind.toUpperCase()+'_'+status.toUpperCase(),o.name||o.no);commit()}};
+ const go=p=>setPage(p);
+ const signIn=u=>{setUser(u);setPage(u.role==='admin'?'a-overview':'dashboard')};
+ const ctx={db,user:cur,svc,toast,go,page,dark};
+ return <Ctx.Provider value={ctx}>
+  <SimBanner/>
+  {!cur?<Auth onAuth={signIn}/>:<Shell dark={dark} setDark={setDark} onLogout={()=>{log(cur,'LOGOUT','Signed out');setUser(null)}}/>}
+  <div className="fixed bottom-4 right-4 z-[60] space-y-2">{toasts.map(t=><div key={t.id} className={cx('max-w-xs rounded-lg px-4 py-3 text-sm text-white shadow-lg',t.kind==='ok'?'bg-emerald-600':'bg-red-600')}>{t.msg}</div>)}</div>
+ </Ctx.Provider>}
+
+/* ---------- Auth ---------- */
+function Auth({onAuth}){
+ const {svc}=useApp();const [mode,setMode]=useState('login');const [portal,setPortal]=useState('customer');
+ const [f,setF]=useState({name:'',email:'',phone:'',password:'',confirm:''});const [err,setErr]=useState({});const [busy,setBusy]=useState(false);const [srv,setSrv]=useState('');
+ const set=k=>e=>setF({...f,[k]:e.target.value});
+ const validate=()=>{const e={};if(mode==='register'&&f.name.trim().length<2)e.name='Enter your full name.';if(!/^\S+@\S+\.\S+$/.test(f.email))e.email='Enter a valid email address.';
+  if(mode==='register'){if(!/^\d{10}$/.test(f.phone))e.phone='Enter a 10-digit phone number.';if(!/^(?=.*[A-Z])(?=.*[a-z])(?=.*\d).{8,}$/.test(f.password))e.password='Min 8 chars with upper, lower case and a number.';if(f.confirm!==f.password)e.confirm='Passwords do not match.'}
+  else if(!f.password)e.password='Enter your password.';setErr(e);return !Object.keys(e).length};
+ const submit=async ev=>{ev.preventDefault();setSrv('');if(!validate())return;setBusy(true);try{const u=mode==='login'?await svc.login(f.email,f.password,portal):await svc.register(f);onAuth(u)}catch(x){setSrv(x.message)}setBusy(false)};
+ return <div className="flex min-h-[calc(100vh-30px)] items-center justify-center bg-gradient-to-br from-navy-900 to-navy-700 p-4">
+  <div className="w-full max-w-md rounded-2xl bg-white p-7 shadow-2xl dark:bg-navy-900">
+   <div className="mb-5 flex items-center gap-2 text-navy-800 dark:text-white"><span className="rounded-lg bg-navy-700 p-2 text-white"><Ic n="bank" c="w-5 h-5"/></span><span className="text-xl font-bold">FinCore Nexus</span></div>
+   <div className="mb-4 grid grid-cols-2 rounded-lg bg-slate-100 p-1 text-sm dark:bg-navy-950">{['customer','admin'].map(p=><button key={p} type="button" onClick={()=>{setPortal(p);setMode('login');setSrv('')}} className={cx('rounded-md py-1.5 capitalize',portal===p&&'bg-white font-medium shadow dark:bg-navy-700')}>{p} portal</button>)}</div>
+   <form onSubmit={submit} className="space-y-3" noValidate>
+    {mode==='register'&&<Field label="Full name" error={err.name}><input className={inp} value={f.name} onChange={set('name')}/></Field>}
+    <Field label="Email" error={err.email}><input className={inp} type="email" value={f.email} onChange={set('email')}/></Field>
+    {mode==='register'&&<Field label="Phone" error={err.phone}><input className={inp} inputMode="numeric" maxLength={10} value={f.phone} onChange={set('phone')}/></Field>}
+    <Field label="Password" error={err.password}><input className={inp} type="password" value={f.password} onChange={set('password')}/></Field>
+    {mode==='register'&&<Field label="Confirm password" error={err.confirm}><input className={inp} type="password" value={f.confirm} onChange={set('confirm')}/></Field>}
+    {srv&&<p className="rounded-lg bg-red-50 p-2 text-sm text-red-700 dark:bg-red-900/30 dark:text-red-300">{srv}</p>}
+    <Btn busy={busy} className="w-full">{mode==='login'?'Sign in':'Create account'}</Btn>
+   </form>
+   {portal==='customer'&&<p className="mt-4 text-center text-sm text-slate-500">{mode==='login'?'New here? ':'Have an account? '}<button className="font-medium text-navy-600 underline dark:text-blue-300" onClick={()=>{setMode(mode==='login'?'register':'login');setErr({});setSrv('')}}>{mode==='login'?'Register':'Sign in'}</button></p>}
+   <div className="mt-4 rounded-lg bg-slate-50 p-3 text-xs text-slate-600 dark:bg-navy-950 dark:text-slate-400"><b>Demo logins</b><br/>Customer: demo@fincore.test / Demo@1234<br/>Admin: admin@fincore.test / Admin@1234</div>
+  </div></div>}
+
+/* ---------- Shell ---------- */
+const CUST=[['dashboard','Dashboard','home'],['accounts','My Accounts','wallet'],['money','Deposit / Withdraw','down'],['transfer','Transfer','swap'],['history','Transactions','list'],['statements','Statements','file'],['profile','Profile','user']];
+const ADM=[['a-overview','Overview','grid'],['a-customers','Customers','users'],['a-accounts','Accounts','wallet'],['a-txns','Transactions','list'],['a-audit','Audit Logs','act']];
+function Shell({dark,setDark,onLogout}){
+ const {user,page,go}=useApp();const [open,setOpen]=useState(false);const nav=user.role==='admin'?ADM:CUST;
+ const Page={dashboard:Dashboard,accounts:Accounts,money:Money,transfer:Transfer,history:History,statements:Statements,profile:Profile,'a-overview':AOverview,'a-customers':ACustomers,'a-accounts':AAccounts,'a-txns':ATxns,'a-audit':AAudit}[page]||Dashboard;
+ return <div className="flex min-h-[calc(100vh-30px)]">
+  {open&&<div className="fixed inset-0 z-30 bg-black/40 lg:hidden" onClick={()=>setOpen(false)}/>}
+  <aside className={cx('fixed z-40 flex h-full w-64 flex-col bg-navy-900 text-slate-200 transition-transform lg:static lg:translate-x-0',open?'translate-x-0':'-translate-x-full')}>
+   <div className="flex items-center gap-2 p-5 text-lg font-bold text-white"><Ic n="bank" c="w-6 h-6"/>FinCore Nexus</div>
+   {user.role==='admin'&&<div className="mx-4 mb-2 rounded bg-navy-600 px-2 py-1 text-xs">ADMIN CONSOLE</div>}
+   <nav className="flex-1 space-y-1 px-3">{nav.map(([k,l,i])=><button key={k} onClick={()=>{go(k);setOpen(false)}} className={cx('flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm',page===k?'bg-navy-600 text-white':'hover:bg-navy-800')}><Ic n={i}/>{l}</button>)}</nav>
+   <button onClick={onLogout} className="m-3 flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm hover:bg-navy-800"><Ic n="out"/>Sign out</button>
+  </aside>
+  <div className="min-w-0 flex-1">
+   <header className="sticky top-0 z-20 flex items-center justify-between border-b border-slate-200 bg-white/90 px-4 py-3 backdrop-blur dark:border-slate-700/60 dark:bg-navy-900/90">
+    <button className="lg:hidden" onClick={()=>setOpen(true)} aria-label="Menu"><Ic n="menu" c="w-6 h-6"/></button><span className="hidden text-sm text-slate-500 lg:block">Welcome back, {user.name}</span>
+    <div className="flex items-center gap-2"><Btn v="gho" onClick={()=>setDark(!dark)} aria-label="Toggle theme"><Ic n={dark?'sun':'moon'}/></Btn><span className="grid h-9 w-9 place-items-center rounded-full bg-navy-700 text-sm font-semibold text-white">{user.name[0]}</span></div>
+   </header>
+   <main className="mx-auto max-w-6xl p-4 md:p-6"><Page/></main>
+  </div></div>}
+
+/* ---------- Customer hooks ---------- */
+const useMine=()=>{const {db,user}=useApp();const accts=db.accounts.filter(a=>a.userId===user.id);const ids=new Set(accts.map(a=>a.id));const txns=db.txns.filter(t=>ids.has(t.from)||ids.has(t.to));return {accts,ids,txns}};
+const TxItem=({t,ids,onClick})=>{const {db}=useApp();const s=signed(t,ids);return <button onClick={onClick} className="flex w-full items-center justify-between gap-3 border-b border-slate-100 py-3 text-left last:border-0 dark:border-slate-800"><div className="flex items-center gap-3"><span className={cx('grid h-9 w-9 place-items-center rounded-full',s>=0?'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40':'bg-red-100 text-red-700 dark:bg-red-900/40')}><Ic n={s>=0?'down':'up'}/></span><div><div className="text-sm font-medium">{t.desc}</div><div className="text-xs text-slate-500">{dt(t.date)} · {acctName(db,ids.has(t.from)?t.from:t.to)}</div></div></div><div className="text-right"><div className={cx('text-sm font-semibold',t.status==='failed'?'text-slate-400 line-through':s>=0?'text-emerald-600':'text-red-600')}>{s>=0?'+':'−'}{fmt(Math.abs(s||t.amount))}</div><Badge s={t.status}/></div></button>};
+
+/* ---------- Dashboard ---------- */
+function Dashboard(){
+ const {go,user}=useApp();const {accts,ids,txns}=useMine();const [sel,setSel]=useState(null);
+ const total=accts.reduce((s,a)=>s+a.balance,0);const ok=txns.filter(t=>t.status==='completed');
+ const now=new Date();const key=d=>{const x=new Date(d);return x.getFullYear()+'-'+x.getMonth()};
+ const months=[...Array(6)].map((_,i)=>{const d=new Date(now.getFullYear(),now.getMonth()-5+i,1);return {k:d.getFullYear()+'-'+d.getMonth(),m:d.toLocaleString('en',{month:'short'}),Income:0,Expenses:0}});
+ ok.forEach(t=>{const r=months.find(m=>m.k===key(t.date));if(!r)return;const s=signed(t,ids);if(s>0)r.Income+=s;else r.Expenses-=s});
+ const cur=months[5];
+ return <><Title t={`Hello, ${user.name.split(' ')[0]}`} sub="Here's your financial overview (simulated data)"/>
+  <div className="grid gap-4 sm:grid-cols-3">
+   <Card className="bg-gradient-to-br from-navy-700 to-navy-900 text-white sm:col-span-1"><div className="text-sm text-blue-200">Total balance</div><div className="mt-1 text-3xl font-bold">{fmt(total)}</div><div className="mt-2 text-xs text-blue-200">{accts.length} account(s)</div></Card>
+   <Card><div className="text-sm text-slate-500">Income this month</div><div className="mt-1 text-2xl font-semibold text-emerald-600">{fmt(cur.Income)}</div></Card>
+   <Card><div className="text-sm text-slate-500">Expenses this month</div><div className="mt-1 text-2xl font-semibold text-red-600">{fmt(cur.Expenses)}</div></Card></div>
+  <div className="mt-4 flex flex-wrap gap-2">{[['money','Deposit','down'],['money','Withdraw','up'],['transfer','Transfer','swap'],['accounts','New account','plus'],['statements','Statement','file']].map(([p,l,i])=><Btn key={l} v="out" onClick={()=>go(p)}><Ic n={i}/>{l}</Btn>)}</div>
+  <div className="mt-4 grid gap-4 lg:grid-cols-5">
+   <Card className="lg:col-span-3"><h2 className="mb-3 font-semibold">Income vs expenses</h2><div className="h-64"><RC.ResponsiveContainer><RC.BarChart data={months}><RC.CartesianGrid strokeDasharray="3 3" stroke="#94a3b855"/><RC.XAxis dataKey="m" stroke="#94a3b8" fontSize={12}/><RC.YAxis stroke="#94a3b8" fontSize={12} tickFormatter={v=>v/1000+'k'}/><RC.Tooltip formatter={v=>fmt(v)} contentStyle={{borderRadius:8}}/><RC.Legend/><RC.Bar dataKey="Income" fill="#2d5fb8" radius={[4,4,0,0]}/><RC.Bar dataKey="Expenses" fill="#f59e0b" radius={[4,4,0,0]}/></RC.BarChart></RC.ResponsiveContainer></div></Card>
+   <Card className="lg:col-span-2"><div className="mb-1 flex justify-between"><h2 className="font-semibold">Recent transactions</h2><button className="text-xs text-navy-600 dark:text-blue-300" onClick={()=>go('history')}>View all</button></div>{txns.slice(0,5).map(t=><TxItem key={t.id} t={t} ids={ids} onClick={()=>setSel(t)}/>)}{!txns.length&&<p className="py-6 text-center text-sm text-slate-500">No transactions yet.</p>}</Card></div>
+  {sel&&<TxDetail t={sel} onClose={()=>setSel(null)}/>}</>}
+
+function TxDetail({t,onClose,title='Transaction details'}){
+ const {db}=useApp();const rows=[['Reference',t.id],['Type',typeLabel[t.type]],['Amount',fmt(t.amount)],['Status',<Badge s={t.status}/>],['Date',dt(t.date)],['From',t.from?acctName(db,t.from):'—'],['To',t.to?acctName(db,t.to):'—'],['Description',t.desc]];
+ return <Modal title={title} onClose={onClose}><dl className="space-y-2 text-sm">{rows.map(([k,v])=><div key={k} className="flex justify-between gap-4 border-b border-slate-100 pb-2 dark:border-slate-800"><dt className="text-slate-500">{k}</dt><dd className="text-right font-medium">{v}</dd></div>)}</dl><p className="mt-3 text-xs text-amber-600">Simulated transaction — not a real banking transaction.</p><Btn className="mt-4 w-full" onClick={onClose}>Close</Btn></Modal>}
+
+/* ---------- Accounts ---------- */
+function Accounts(){
+ const {user,svc,toast,db}=useApp();const {accts,ids}=useMine();const [show,setShow]=useState(false);const [det,setDet]=useState(null);const [type,setType]=useState('Savings');const [nick,setNick]=useState('');const [busy,setBusy]=useState(false);
+ const create=async()=>{setBusy(true);try{const a=await svc.openAccount(user,type,nick.trim());toast('Account created: '+a.no);setShow(false);setNick('')}catch(e){toast(e.message,'err')}setBusy(false)};
+ return <><Title t="My Accounts" sub="Simulated accounts"><Btn onClick={()=>setShow(true)}><Ic n="plus"/>New account</Btn></Title>
+  <div className="grid gap-4 md:grid-cols-2">{accts.map(a=><Card key={a.id}><div className="flex justify-between"><div><div className="font-semibold">{a.nick}</div><div className="text-xs text-slate-500">{a.type} · {a.no}</div></div><Badge s={a.status}/></div><div className="mt-4 text-2xl font-bold text-navy-700 dark:text-blue-300">{fmt(a.balance)}</div><Btn v="out" className="mt-4" onClick={()=>setDet(a)}>View details</Btn></Card>)}</div>
+  {show&&<Modal title="Open new account" onClose={()=>setShow(false)}><div className="space-y-3"><Field label="Account type"><select className={inp} value={type} onChange={e=>setType(e.target.value)}><option>Savings</option><option>Current</option></select></Field><Field label="Nickname (optional)"><input className={inp} maxLength={30} value={nick} onChange={e=>setNick(e.target.value)}/></Field><Btn busy={busy} className="w-full" onClick={create}>Create account</Btn></div></Modal>}
+  {det&&<Modal title="Account details" onClose={()=>setDet(null)}><dl className="space-y-2 text-sm">{[['Name',det.nick],['Account no.',det.no],['Type',det.type],['Balance',fmt(det.balance)],['Status',<Badge s={det.status}/>],['Opened',dt(det.opened)],['Transactions',db.txns.filter(t=>t.from===det.id||t.to===det.id).length]].map(([k,v])=><div key={k} className="flex justify-between border-b border-slate-100 pb-2 dark:border-slate-800"><dt className="text-slate-500">{k}</dt><dd className="font-medium">{v}</dd></div>)}</dl></Modal>}</>}
+
+/* ---------- Deposit / Withdraw ---------- */
+function Money(){
+ const {user,svc,toast}=useApp();const {accts}=useMine();const [mode,setMode]=useState('deposit');const [acct,setAcct]=useState(accts[0]?.id||'');const [amt,setAmt]=useState('');const [note,setNote]=useState('');const [err,setErr]=useState('');
+ const [confirm,setConfirm]=useState(false);const [busy,setBusy]=useState(false);const [res,setRes]=useState(null);
+ const a=accts.find(x=>x.id===acct);const n=parseFloat(amt);
+ const check=()=>{let e='';if(!a)e='Select an account.';else if(a.status!=='active')e='This account is not active.';else if(!amt||isNaN(n)||n<=0)e='Enter an amount greater than zero.';else if(!/^\d+(\.\d{1,2})?$/.test(amt))e='Use at most 2 decimal places.';else if(mode==='deposit'&&n>500000)e='Demo deposit limit is ₹5,00,000.';else if(mode==='withdraw'&&n>a.balance)e='Insufficient balance. Available: '+fmt(a.balance);setErr(e);if(!e)setConfirm(true)};
+ const run=async()=>{setBusy(true);try{const t=await svc[mode](user,acct,n,note.trim());setRes({ok:true,t});setAmt('');setNote('');toast(mode==='deposit'?'Deposit successful':'Withdrawal successful')}catch(e){setRes({ok:false,msg:e.message});toast(e.message,'err')}setBusy(false);setConfirm(false)};
+ return <><Title t="Deposit & Withdraw" sub="Simulated cash operations"/>
+  <Card className="max-w-lg"><div className="mb-4 grid grid-cols-2 rounded-lg bg-slate-100 p-1 text-sm dark:bg-navy-950">{[['deposit','Deposit'],['withdraw','Withdraw']].map(([k,l])=><button key={k} onClick={()=>{setMode(k);setErr('')}} className={cx('rounded-md py-1.5',mode===k&&'bg-white font-medium shadow dark:bg-navy-700')}>{l}</button>)}</div>
+   <div className="space-y-3"><Field label="Account"><select className={inp} value={acct} onChange={e=>setAcct(e.target.value)}>{accts.map(x=><option key={x.id} value={x.id}>{x.nick} ••{x.no.slice(-4)} — {fmt(x.balance)}</option>)}</select></Field>
+    <Field label="Amount (₹)" error={err}><input className={inp} inputMode="decimal" placeholder="0.00" value={amt} onChange={e=>setAmt(e.target.value)}/></Field>
+    <Field label="Note (optional)"><input className={inp} maxLength={60} value={note} onChange={e=>setNote(e.target.value)}/></Field>
+    <Btn className="w-full" onClick={check}>Continue</Btn></div></Card>
+  {confirm&&<Modal title={`Confirm ${mode}`} onClose={()=>!busy&&setConfirm(false)}><p className="text-sm">{mode==='deposit'?'Deposit':'Withdraw'} <b>{fmt(n)}</b> {mode==='deposit'?'into':'from'} <b>{a.nick} ••{a.no.slice(-4)}</b>?</p><p className="mt-1 text-xs text-amber-600">Simulation only — no real money moves.</p><div className="mt-4 flex gap-2"><Btn v="out" className="flex-1" disabled={busy} onClick={()=>setConfirm(false)}>Cancel</Btn><Btn busy={busy} className="flex-1" onClick={run}>Confirm</Btn></div></Modal>}
+  {res&&(res.ok?<TxDetail t={res.t} title="✓ Transaction successful" onClose={()=>setRes(null)}/>:<Modal title="Transaction failed" onClose={()=>setRes(null)}><p className="text-sm text-red-600">{res.msg}</p><Btn className="mt-4 w-full" onClick={()=>setRes(null)}>Close</Btn></Modal>)}</>}
+
+/* ---------- Transfer ---------- */
+function Transfer(){
+ const {user,svc,toast,db}=useApp();const {accts}=useMine();const [from,setFrom]=useState(accts[0]?.id||'');const [to,setTo]=useState('');const [amt,setAmt]=useState('');const [note,setNote]=useState('');const [err,setErr]=useState({});
+ const [confirm,setConfirm]=useState(false);const [busy,setBusy]=useState(false);const [res,setRes]=useState(null);
+ const f=accts.find(a=>a.id===from);const rec=db.accounts.find(a=>a.no===to.trim().toUpperCase());const recUser=rec&&db.users.find(u=>u.id===rec.userId);const n=parseFloat(amt);
+ const check=()=>{const e={};if(!f)e.from='Select a sender account.';if(!to.trim())e.to='Enter or pick a recipient account number.';else if(!rec)e.to='No FinCore account found with that number.';else if(rec.id===from)e.to='Cannot transfer to the same account.';else if(rec.status!=='active')e.to='Recipient account is not active.';
+  if(!amt||isNaN(n)||n<=0)e.amt='Enter an amount greater than zero.';else if(!/^\d+(\.\d{1,2})?$/.test(amt))e.amt='Use at most 2 decimal places.';else if(f&&n>f.balance)e.amt='Insufficient balance. Available: '+fmt(f.balance);else if(f&&f.status!=='active')e.from='Sender account is not active.';
+  setErr(e);if(!Object.keys(e).length)setConfirm(true)};
+ const run=async()=>{setBusy(true);try{const t=await svc.transfer(user,from,to,n,note.trim());setRes({ok:true,t});setAmt('');setNote('');setTo('');toast('Transfer successful')}catch(e){setRes({ok:false,msg:e.message});toast(e.message,'err')}setBusy(false);setConfirm(false)};
+ const others=accts.filter(a=>a.id!==from);
+ return <><Title t="Money Transfer" sub="Move money between FinCore accounts (simulated)"/>
+  <Card className="max-w-lg"><div className="space-y-3">
+   <Field label="From account" error={err.from}><select className={inp} value={from} onChange={e=>setFrom(e.target.value)}>{accts.map(x=><option key={x.id} value={x.id}>{x.nick} ••{x.no.slice(-4)} — {fmt(x.balance)}</option>)}</select></Field>
+   <Field label="Recipient account number" error={err.to}><input className={inp} placeholder="e.g. FCN2002345601" value={to} onChange={e=>setTo(e.target.value)}/></Field>
+   {others.length>0&&<div className="flex flex-wrap gap-2 text-xs">{others.map(o=><button key={o.id} className="rounded-full border border-slate-300 px-2 py-1 dark:border-slate-600" onClick={()=>setTo(o.no)}>My {o.nick}</button>)}<button className="rounded-full border border-slate-300 px-2 py-1 dark:border-slate-600" onClick={()=>setTo('FCN2002345601')}>Demo: Arjun Mehta</button></div>}
+   {rec&&recUser&&<p className="text-xs text-emerald-600">Recipient: {recUser.name} ({rec.type})</p>}
+   <Field label="Amount (₹)" error={err.amt}><input className={inp} inputMode="decimal" placeholder="0.00" value={amt} onChange={e=>setAmt(e.target.value)}/></Field>
+   <Field label="Note (optional)"><input className={inp} maxLength={60} value={note} onChange={e=>setNote(e.target.value)}/></Field>
+   <Btn className="w-full" onClick={check}>Review transfer</Btn></div></Card>
+  {confirm&&<Modal title="Confirm transfer" onClose={()=>!busy&&setConfirm(false)}><dl className="space-y-1 text-sm"><div>From: <b>{f.nick} ••{f.no.slice(-4)}</b></div><div>To: <b>{recUser.name} ••{rec.no.slice(-4)}</b></div><div>Amount: <b>{fmt(n)}</b></div></dl><p className="mt-2 text-xs text-amber-600">Simulation only — no real money moves.</p><div className="mt-4 flex gap-2"><Btn v="out" className="flex-1" disabled={busy} onClick={()=>setConfirm(false)}>Cancel</Btn><Btn busy={busy} className="flex-1" onClick={run}>Confirm</Btn></div></Modal>}
+  {res&&(res.ok?<TxDetail t={res.t} title="✓ Transfer receipt" onClose={()=>setRes(null)}/>:<Modal title="Transfer failed" onClose={()=>setRes(null)}><p className="text-sm text-red-600">{res.msg}</p><Btn className="mt-4 w-full" onClick={()=>setRes(null)}>Close</Btn></Modal>)}</>}
+
+/* ---------- History ---------- */
+function Filters({q,setQ,from,setFrom,to,setTo,st,setSt,ty,setTy}){return <div className="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-5"><div className="relative lg:col-span-1"><span className="absolute left-2.5 top-2.5 text-slate-400"><Ic n="search"/></span><input className={inp+' pl-8'} placeholder="Search…" value={q} onChange={e=>setQ(e.target.value)}/></div><input type="date" className={inp} value={from} onChange={e=>setFrom(e.target.value)} aria-label="From date"/><input type="date" className={inp} value={to} onChange={e=>setTo(e.target.value)} aria-label="To date"/><select className={inp} value={st} onChange={e=>setSt(e.target.value)}><option value="">All statuses</option><option>completed</option><option>failed</option><option>pending</option></select><select className={inp} value={ty} onChange={e=>setTy(e.target.value)}><option value="">All types</option><option value="deposit">Deposit</option><option value="withdrawal">Withdrawal</option><option value="transfer">Transfer</option></select></div>}
+const useFilter=(list,db)=>{const [q,setQ]=useState('');const [from,setFrom]=useState('');const [to,setTo]=useState('');const [st,setSt]=useState('');const [ty,setTy]=useState('');
+ const out=list.filter(t=>(!q||(t.desc+t.id+acctName(db,t.from)+acctName(db,t.to)).toLowerCase().includes(q.toLowerCase()))&&(!from||t.date.slice(0,10)>=from)&&(!to||t.date.slice(0,10)<=to)&&(!st||t.status===st)&&(!ty||t.type===ty));
+ return {out,props:{q,setQ,from,setFrom,to,setTo,st,setSt,ty,setTy}}};
+function History(){
+ const {db}=useApp();const {ids,txns}=useMine();const {out,props}=useFilter(txns,db);const [sel,setSel]=useState(null);
+ return <><Title t="Transaction History" sub={`${out.length} transaction(s)`}/><Card><Filters {...props}/>{out.map(t=><TxItem key={t.id} t={t} ids={ids} onClick={()=>setSel(t)}/>)}{!out.length&&<p className="py-8 text-center text-sm text-slate-500">No transactions match your filters.</p>}</Card>{sel&&<TxDetail t={sel} onClose={()=>setSel(null)}/>}</>}
+
+/* ---------- Statements ---------- */
+function Statements(){
+ const {db,toast}=useApp();const {accts,txns}=useMine();const [acct,setAcct]=useState('all');const [from,setFrom]=useState(new Date(Date.now()-30*864e5).toISOString().slice(0,10));const [to,setTo]=useState(new Date().toISOString().slice(0,10));
+ const err=from>to?'Start date must be before end date.':'';
+ const rows=err?[]:txns.filter(t=>t.status==='completed'&&t.date.slice(0,10)>=from&&t.date.slice(0,10)<=to&&(acct==='all'||t.from===acct||t.to===acct)).sort((a,b)=>a.date.localeCompare(b.date));
+ const sgn=t=>acct==='all'?signed(t,new Set(accts.map(a=>a.id))):signed(t,new Set([acct]));
+ const download=async()=>{const q=v=>'"'+String(v).replace(/"/g,'""')+'"';const csv=['Date,Reference,Type,Description,Credit,Debit,Status (SIMULATED DATA)',...rows.map(t=>{const s=sgn(t);return [q(dt(t.date)),t.id,t.type,q(t.desc),s>0?s.toFixed(2):'',s<0?(-s).toFixed(2):'',t.status].join(',')})].join('\n');
+  try{const d=await window.claude?.use('downloads');if(!d){toast('Download is not available in this view.','err');return}await d.save({filename:`fincore-statement-${from}_to_${to}.csv`,data:new Blob([csv],{type:'text/csv'})});toast('Statement ready')}catch(e){if(e&&e.code!=='declined')toast('Could not save file.','err')}};
+ return <><Title t="Statements" sub="Select a range and export as CSV"/><Card><div className="grid gap-3 sm:grid-cols-4"><Field label="Account"><select className={inp} value={acct} onChange={e=>setAcct(e.target.value)}><option value="all">All accounts</option>{accts.map(a=><option key={a.id} value={a.id}>{a.nick} ••{a.no.slice(-4)}</option>)}</select></Field><Field label="From" error={err}><input type="date" className={inp} value={from} onChange={e=>setFrom(e.target.value)}/></Field><Field label="To"><input type="date" className={inp} value={to} onChange={e=>setTo(e.target.value)}/></Field><div className="flex items-end"><Btn className="w-full" disabled={!rows.length} onClick={download}><Ic n="dl"/>Download CSV</Btn></div></div>
+  <div className="mt-4"><Table cols={['Date','Reference','Description','Credit','Debit']} empty="No completed transactions in this range." rows={rows.map(t=>{const s=sgn(t);return [dt(t.date),t.id,t.desc,s>0?fmt(s):'',s<0?fmt(-s):'']})}/></div></Card></>}
+
+/* ---------- Profile ---------- */
+function Profile(){
+ const {user,svc,toast}=useApp();const [edit,setEdit]=useState(false);const [f,setF]=useState({name:user.name,phone:user.phone,address:user.address});const [err,setErr]=useState({});const [busy,setBusy]=useState(false);
+ const save=async()=>{const e={};if(f.name.trim().length<2)e.name='Enter your full name.';if(!/^\d{10}$/.test(f.phone))e.phone='Enter a 10-digit phone number.';setErr(e);if(Object.keys(e).length)return;setBusy(true);await svc.updateProfile(user,{name:f.name.trim(),phone:f.phone,address:f.address.trim()});setBusy(false);setEdit(false);toast('Profile updated')};
+ return <><Title t="Profile"/><Card className="max-w-lg">{edit?<div className="space-y-3"><Field label="Full name" error={err.name}><input className={inp} value={f.name} onChange={e=>setF({...f,name:e.target.value})}/></Field><Field label="Phone" error={err.phone}><input className={inp} maxLength={10} value={f.phone} onChange={e=>setF({...f,phone:e.target.value})}/></Field><Field label="Address"><input className={inp} value={f.address} onChange={e=>setF({...f,address:e.target.value})}/></Field><div className="flex gap-2"><Btn v="out" onClick={()=>{setEdit(false);setErr({})}}>Cancel</Btn><Btn busy={busy} onClick={save}>Save changes</Btn></div></div>
+  :<><dl className="space-y-3 text-sm">{[['Name',user.name],['Email',user.email],['Phone',user.phone],['Address',user.address||'—'],['Customer since',dt(user.joined)],['Status',<Badge s={user.status}/>]].map(([k,v])=><div key={k} className="flex justify-between border-b border-slate-100 pb-2 dark:border-slate-800"><dt className="text-slate-500">{k}</dt><dd className="font-medium">{v}</dd></div>)}</dl><Btn className="mt-4" onClick={()=>{setF({name:user.name,phone:user.phone,address:user.address});setEdit(true)}}>Edit profile</Btn></>}</Card></>}
+
+/* ---------- Admin ---------- */
+const Stat=({l,v,s})=><Card><div className="text-sm text-slate-500">{l}</div><div className="mt-1 text-2xl font-bold text-navy-700 dark:text-blue-300">{v}</div>{s&&<div className="text-xs text-slate-500">{s}</div>}</Card>;
+function AOverview(){
+ const {db}=useApp();const cust=db.users.filter(u=>u.role==='customer');const vol=db.txns.filter(t=>t.status==='completed').reduce((s,t)=>s+t.amount,0);
+ const byType=['deposit','withdrawal','transfer'].map(k=>({name:typeLabel[k],value:db.txns.filter(t=>t.type===k).length}));const COL=['#2d5fb8','#f59e0b','#10b981'];
+ return <><Title t="Admin Overview" sub="Platform summary (simulated data)"/><div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4"><Stat l="Customers" v={cust.length} s={cust.filter(u=>u.status==='active').length+' active'}/><Stat l="Accounts" v={db.accounts.length} s={fmt(db.accounts.reduce((s,a)=>s+a.balance,0))+' held'}/><Stat l="Transactions" v={db.txns.length} s={db.txns.filter(t=>t.status==='failed').length+' failed'}/><Stat l="Completed volume" v={fmt(vol)}/></div>
+  <div className="mt-4 grid gap-4 lg:grid-cols-2"><Card><h2 className="mb-2 font-semibold">Transactions by type</h2><div className="h-56"><RC.ResponsiveContainer><RC.PieChart><RC.Pie data={byType} dataKey="value" nameKey="name" outerRadius={80} label>{byType.map((_,i)=><RC.Cell key={i} fill={COL[i]}/>)}</RC.Pie><RC.Tooltip/><RC.Legend/></RC.PieChart></RC.ResponsiveContainer></div></Card><Card><h2 className="mb-2 font-semibold">Latest audit events</h2>{db.audit.slice(0,6).map(a=><div key={a.id} className="border-b border-slate-100 py-2 text-sm last:border-0 dark:border-slate-800"><b>{a.action}</b> · {a.actor}<div className="text-xs text-slate-500">{dt(a.date)} — {a.detail}</div></div>)}</Card></div></>}
+function ACustomers(){
+ const {db,svc,user,toast}=useApp();const [q,setQ]=useState('');const list=db.users.filter(u=>u.role==='customer'&&(u.name+u.email+u.phone).toLowerCase().includes(q.toLowerCase()));
+ const flip=async u=>{const s=u.status==='active'?'suspended':'active';await svc.setStatus(user,'user',u.id,s);toast(`${u.name} is now ${s}`)};
+ return <><Title t="Customers" sub={`${list.length} customer(s)`}/><Card><input className={inp+' mb-4 max-w-sm'} placeholder="Search name, email, phone…" value={q} onChange={e=>setQ(e.target.value)}/><Table cols={['Name','Email','Phone','Accounts','Joined','Status','Action']} rows={list.map(u=>[u.name,u.email,u.phone,db.accounts.filter(a=>a.userId===u.id).length,dt(u.joined),<Badge s={u.status}/>,<Btn v="out" className="!py-1 !text-xs" onClick={()=>flip(u)}>{u.status==='active'?'Suspend':'Reactivate'}</Btn>])}/></Card></>}
+function AAccounts(){
+ const {db,svc,user,toast}=useApp();const [q,setQ]=useState('');const [st,setSt]=useState('');const list=db.accounts.filter(a=>(a.no+a.nick+(db.users.find(u=>u.id===a.userId)?.name||'')).toLowerCase().includes(q.toLowerCase())&&(!st||a.status===st));
+ const flip=async a=>{const s=a.status==='active'?'frozen':'active';await svc.setStatus(user,'account',a.id,s);toast(`${a.no} is now ${s}`)};
+ return <><Title t="Account Monitoring"/><Card><div className="mb-4 flex flex-wrap gap-2"><input className={inp+' max-w-xs'} placeholder="Search…" value={q} onChange={e=>setQ(e.target.value)}/><select className={inp+' max-w-[10rem]'} value={st} onChange={e=>setSt(e.target.value)}><option value="">All</option><option>active</option><option>frozen</option></select></div><Table cols={['Account no.','Owner','Type','Balance','Status','Action']} rows={list.map(a=>[a.no,db.users.find(u=>u.id===a.userId)?.name,a.type,fmt(a.balance),<Badge s={a.status}/>,<Btn v="out" className="!py-1 !text-xs" onClick={()=>flip(a)}>{a.status==='active'?'Freeze':'Unfreeze'}</Btn>])}/></Card></>}
+function ATxns(){
+ const {db}=useApp();const {out,props}=useFilter(db.txns,db);const [sel,setSel]=useState(null);
+ return <><Title t="Transaction Monitoring" sub={`${out.length} transaction(s)`}/><Card><Filters {...props}/><Table cols={['Date','Ref','Type','From','To','Amount','Status']} onRow={i=>setSel(out[i])} rows={out.slice(0,100).map(t=>[dt(t.date),t.id,typeLabel[t.type],t.from?acctName(db,t.from):'—',t.to?acctName(db,t.to):'—',fmt(t.amount),<Badge s={t.status}/>])}/></Card>{sel&&<TxDetail t={sel} onClose={()=>setSel(null)}/>}</>}
+function AAudit(){const {db}=useApp();return <><Title t="Audit Logs" sub="Actions recorded during this demo session"/><Card><Table cols={['Time','Actor','Action','Detail']} rows={db.audit.slice(0,150).map(a=>[dt(a.date),a.actor,<span className="font-mono text-xs">{a.action}</span>,a.detail])}/></Card></>}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script></body></html>
