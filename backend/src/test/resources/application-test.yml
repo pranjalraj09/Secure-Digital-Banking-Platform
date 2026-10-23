@@ -1,0 +1,30 @@
+spring:
+  application:
+    name: fincore-nexus-backend-test
+
+  datasource:
+    url: jdbc:h2:mem:fincoredb_${random.uuid};DB_CLOSE_DELAY=-1;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+
+  jpa:
+    database-platform: org.hibernate.dialect.H2Dialect
+    open-in-view: false
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: false
+
+  flyway:
+    enabled: false
+
+banking:
+  cache:
+    type: memory
+  kafka:
+    enabled: false
+  jwt:
+    secret: FinCoreNexusSuperSecureDevSecretKeyForJwtSigningMustBe32BytesOrLonger
+    expiration-ms: 3600000
+  dev-auth:
+    enabled: true
