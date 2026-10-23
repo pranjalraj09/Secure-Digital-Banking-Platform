@@ -1,0 +1,7 @@
+package com.fincore.nexus.exception;
+
+public class InvalidAccountStateTransitionException extends RuntimeException {
+    public InvalidAccountStateTransitionException(String message) {
+        super(message);
+    }
+}
