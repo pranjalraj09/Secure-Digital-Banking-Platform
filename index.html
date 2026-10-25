@@ -59,6 +59,110 @@ const seed=()=>{
  const audit=[{id:uid('AUD'),date:dAgo(2),actor:'Admin Officer',action:'ACCOUNT_REVIEW',detail:'Routine review of dormant accounts'},{id:uid('AUD'),date:dAgo(1),actor:'Priya Sharma',action:'LOGIN',detail:'Customer sign-in'}];
  return {users,accounts,txns,audit};};
 
+/* ---------- BACKEND CONNECTION (added) — start ---------- */
+const USE_BACKEND=true;                 // set to false to go back to the original fake demo (no backend needed)
+const API_URL='http://localhost:8080';
+let TOKEN=null,ROLE=null;
+const isUuid=s=>/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(s));
+const items=p=>Array.isArray(p)?p:(p&&p.content)||[];
+
+// one helper that talks to the backend
+async function api(path,method='GET',body){
+ let res;
+ try{res=await fetch(API_URL+path,{method,headers:{'Content-Type':'application/json',...(TOKEN?{Authorization:'Bearer '+TOKEN}:{})},body:body?JSON.stringify(body):undefined})}
+ catch(e){throw Error('Cannot reach the backend at '+API_URL+'. Is it running?')}
+ const data=await res.json().catch(()=>null);
+ if(!res.ok){
+  let msg=(data&&(data.message||data.error))||'';
+  if(data&&data.details)msg+=(msg?' — ':'')+Object.values(data.details).join(', ');
+  if(!msg)msg=res.status===401?'Session expired. Please sign in again.':res.status===403?'You are not allowed to do this.':'Request failed ('+res.status+')';
+  throw Error(msg)}
+ return data}
+
+// TEMPORARY dev login: the backend hands out a pass (token). Replace with Keycloak later.
+async function getToken(username,role,customerId){
+ TOKEN=null;ROLE=null;
+ const q=new URLSearchParams({username,role});if(customerId)q.set('customerId',customerId);
+ const d=await api('/api/auth/token?'+q.toString(),'POST');
+ TOKEN=d.token;ROLE=role}
+
+// some actions are staff-only in the backend (e.g. opening an account); borrow a teller pass, then give the user's pass back
+async function asStaff(fn){const k=[TOKEN,ROLE];await getToken('teller@fincore.bank','TELLER');try{return await fn()}finally{TOKEN=k[0];ROLE=k[1]}}
+
+// backend -> website shapes
+const toAcct=(r,userId,old)=>({id:r.id,no:r.accountNumber,userId,type:r.accountType==='CHECKING'?'Current':'Savings',
+ nick:(old&&old.nick)||(r.accountType==='CHECKING'?'Current Account':'Savings Account'),
+ balance:Number(r.balance),status:String(r.status||'ACTIVE').toLowerCase(),opened:r.createdAt});
+const toTxn=r=>{const w=String(r.transactionType).toUpperCase()==='WITHDRAWAL';const st=String(r.status).toUpperCase();
+ const status=st==='COMPLETED'?'completed':(st==='FAILED'||st==='REJECTED')?'failed':'pending';
+ return {id:r.id,date:r.timestamp,type:w?'withdrawal':'deposit',amount:Number(r.amount),
+  desc:(r.description||(w?'Cash withdrawal':'Cash deposit'))+(status==='failed'&&r.failureReason?' — '+r.failureReason:''),
+  from:w?r.accountId:null,to:w?null:r.accountId,status,note:''}};
+function upsertAcct(db,a){const i=db.accounts.findIndex(x=>x.id===a.id);if(i>=0)db.accounts[i]=a;else db.accounts.push(a)}
+function setTxns(db,accId,list){db.txns=db.txns.filter(t=>t.from!==accId&&t.to!==accId).concat(list);db.txns.sort((a,b)=>String(b.date).localeCompare(String(a.date)))}
+// remove the original made-up accounts/transactions (their ids are not real backend ids)
+function dropFake(db){const f=new Set(db.accounts.filter(a=>!isUuid(a.id)).map(a=>a.id));db.accounts=db.accounts.filter(a=>!f.has(a.id));db.txns=db.txns.filter(t=>!f.has(t.from)&&!f.has(t.to))}
+
+// make sure this website user exists as a real customer in the backend, then switch to their own pass
+async function linkBackend(u){
+ if(u.role==='admin'){await getToken('admin@fincore.bank','ADMIN');return}
+ await getToken('teller@fincore.bank','TELLER');
+ let c=items(await api('/api/customers?size=200')).find(x=>String(x.email).toLowerCase()===u.email.toLowerCase());
+ if(!c){const p=u.name.trim().split(/\s+/);
+  c=await api('/api/customers','POST',{firstName:p[0],lastName:p.slice(1).join(' ')||'-',email:u.email,phoneNumber:u.phone||'0000000000'})}
+ u.customerId=c.id;
+ await getToken(u.email,'CUSTOMER',c.id)}
+
+// load this customer's accounts + transactions
+async function loadMine(db,u){
+ for(const r of items(await api('/api/customers/'+u.customerId+'/accounts'))){
+  upsertAcct(db,toAcct(r,u.id,db.accounts.find(x=>x.id===r.id)));
+  setTxns(db,r.id,items(await api('/api/accounts/'+r.id+'/transactions?size=200')).map(toTxn))}}
+
+// load everything an admin screen needs
+async function refreshAdminData(db){
+ const byCust={};
+ for(const c of items(await api('/api/customers?size=200'))){
+  let u=db.users.find(x=>x.customerId===c.id||String(x.email).toLowerCase()===String(c.email).toLowerCase());
+  if(!u){u={id:'c-'+c.id,name:c.fullName||(c.firstName+' '+c.lastName),email:c.email,password:null,phone:c.phoneNumber||'',
+   address:[c.addressLine1,c.city].filter(Boolean).join(', '),role:'customer',status:'active',joined:c.createdAt};db.users.push(u)}
+  u.customerId=c.id;byCust[c.id]=u}
+ const accs=items(await api('/api/accounts?size=200'));
+ for(const r of accs){const u=byCust[r.customerId];upsertAcct(db,toAcct(r,u?u.id:null,db.accounts.find(x=>x.id===r.id)))}
+ for(const r of accs.slice(0,30))setTxns(db,r.id,items(await api('/api/accounts/'+r.id+'/transactions?size=100')).map(toTxn));
+ db.audit=items(await api('/api/audit-logs?size=100')).map(a=>({id:a.id,date:a.timestamp,actor:a.actor,action:a.action,detail:[a.resourceType,a.outcome].filter(Boolean).join(' · ')}))}
+
+// the real versions of the website actions (they replace the fake ones)
+function makeBackendSvc({db,commit,fake}){
+ const money=async(u,id,amt,note,kind)=>{
+  const a=db.accounts.find(x=>x.id===id);if(!a)throw Error('Account not found.');
+  const r=await api('/api/accounts/'+id+'/transactions/'+kind,'POST',{amount:amt,description:note||(kind==='deposit'?'Cash deposit':'Cash withdrawal'),referenceId:'WEB-'+Date.now()+'-'+Math.random().toString(36).slice(2,6)});
+  a.balance=Number(r.resultingBalance);
+  const t={id:r.id,date:r.timestamp,type:kind==='deposit'?'deposit':'withdrawal',amount:Number(r.amount),desc:r.description||(kind==='deposit'?'Cash deposit':'Cash withdrawal'),
+   from:kind==='deposit'?null:id,to:kind==='deposit'?id:null,status:'completed',note};
+  db.txns.unshift(t);commit();return t};
+ return {
+  async login(email,pw,portal){const u=await fake.login(email,pw,portal);   // password check is still local until Keycloak
+   await linkBackend(u);dropFake(db);
+   if(u.role==='admin')await refreshAdminData(db);else await loadMine(db,u);
+   commit();return u},
+  async register(f){const u=await fake.register(f);await linkBackend(u);dropFake(db);commit();return u},
+  async openAccount(u,type,nick){
+   if(db.accounts.filter(a=>a.userId===u.id).length>=5)throw Error('Maximum of 5 accounts reached.');
+   const r=await asStaff(()=>api('/api/accounts','POST',{customerId:u.customerId,accountType:type==='Current'?'CHECKING':'SAVINGS',currency:'INR',initialBalance:0}));
+   const a=toAcct(r,u.id,{nick:nick||type+' Account'});upsertAcct(db,a);commit();return a},
+  deposit:(u,id,amt,note)=>money(u,id,amt,note,'deposit'),
+  withdraw:(u,id,amt,note)=>money(u,id,amt,note,'withdraw'),
+  async transfer(){throw Error('Transfer is not available yet: the backend transfer API is still being built.')},
+  async setStatus(admin,kind,id,status){
+   if(kind==='account'&&isUuid(id)){
+    await api('/api/accounts/'+id+'/status','PATCH',{status:status==='frozen'?'FROZEN':'ACTIVE',reason:'Changed from admin console'});
+    const a=db.accounts.find(x=>x.id===id);if(a)a.status=status;commit();return}
+   return fake.setStatus(admin,kind,id,status)},          // customer suspend/reactivate is still local only
+  async refreshAdmin(){if(ROLE!=='ADMIN')return;try{await refreshAdminData(db);commit()}catch(e){console.warn('Admin refresh failed:',e.message)}}
+ }}
+/* ---------- BACKEND CONNECTION (added) — end ---------- */
+
 const Ctx=createContext();const useApp=()=>useContext(Ctx);
 
 /* ---------- UI primitives ---------- */
@@ -75,7 +179,7 @@ const Table=({cols,rows,onRow,empty='No records found.'})=><div className="overf
 const signed=(t,ids)=>(ids.has(t.to)?t.amount:0)-(ids.has(t.from)?t.amount:0);
 const acctName=(db,id)=>{const a=db.accounts.find(x=>x.id===id);return a?`${a.nick||a.type} ••${a.no.slice(-4)}`:'External'};
 const typeLabel={deposit:'Deposit',withdrawal:'Withdrawal',transfer:'Transfer'};
-const SimBanner=()=><div className="bg-amber-400 px-3 py-1.5 text-center text-xs font-semibold text-navy-950">SIMULATION ONLY</div>;
+const SimBanner=()=><div className="bg-amber-400 px-3 py-1.5 text-center text-xs font-semibold text-navy-950">{USE_BACKEND?'LIVE BACKEND · DEV MODE · test data only':'SIMULATION ONLY'}</div>;
 
 /* ---------- App ---------- */
 function App(){
@@ -86,7 +190,7 @@ function App(){
  const toast=(msg,kind='ok')=>{const id=Math.random();setToasts(t=>[...t,{id,msg,kind}]);setTimeout(()=>setToasts(t=>t.filter(x=>x.id!==id)),4000)};
  const log=(actor,action,detail)=>db.audit.unshift({id:uid('AUD'),date:new Date().toISOString(),actor:actor.name,action,detail});
  const cur=user&&db.users.find(u=>u.id===user.id);
- const svc={
+ const fake={
   async login(email,pw,portal){await delay(700);const u=db.users.find(u=>u.email===email.trim().toLowerCase()&&u.password===pw);if(!u)throw Error('Invalid email or password.');if(u.role!==portal)throw Error(portal==='admin'?'This account does not have admin access.':'Admins must use the Admin portal.');if(u.status!=='active')throw Error('This profile is suspended. Contact support.');log(u,'LOGIN',portal+' sign-in');commit();return u},
   async register(f){await delay(800);if(db.users.some(u=>u.email===f.email.toLowerCase()))throw Error('An account with this email already exists.');const u={id:uid('u'),name:f.name,email:f.email.toLowerCase(),password:f.password,phone:f.phone,address:'',role:'customer',status:'active',joined:new Date().toISOString()};db.users.push(u);log(u,'REGISTER','New customer registered');commit();return u},
   async openAccount(u,type,nick){await delay(700);if(db.accounts.filter(a=>a.userId===u.id).length>=5)throw Error('Maximum of 5 accounts reached.');const a={id:uid('a'),no:'FCN'+Math.floor(1e9+Math.random()*9e9)+'',userId:u.id,type,nick:nick||type+' Account',balance:0,status:'active',opened:new Date().toISOString()};db.accounts.push(a);log(u,'ACCOUNT_OPEN',`${type} ${a.no}`);commit();return a},
@@ -95,12 +199,13 @@ function App(){
   async transfer(u,fromId,toNo,amt,note){await delay(1000);const f=db.accounts.find(x=>x.id===fromId);const t=db.accounts.find(x=>x.no===toNo.trim().toUpperCase());if(!f||f.userId!==u.id)throw Error('Sender account not found.');if(!t)throw Error('Recipient account number not found.');if(t.id===f.id)throw Error('Cannot transfer to the same account.');if(f.status!=='active'||t.status!=='active')throw Error('Both accounts must be active.');if(!(amt>0))throw Error('Amount must be positive.');if(amt>f.balance)throw Error('Insufficient balance for this transfer.');f.balance=+(f.balance-amt).toFixed(2);t.balance=+(t.balance+amt).toFixed(2);const x={id:uid('TXN'),date:new Date().toISOString(),type:'transfer',amount:amt,desc:note||'Transfer',from:f.id,to:t.id,status:'completed',note};db.txns.unshift(x);log(u,'TRANSFER',`${fmt(amt)} ${f.no} → ${t.no}`);commit();return x},
   async updateProfile(u,f){await delay(600);Object.assign(db.users.find(x=>x.id===u.id),f);log(u,'PROFILE_UPDATE','Profile edited');commit()},
   async setStatus(admin,kind,id,status){await delay(400);const o=(kind==='user'?db.users:db.accounts).find(x=>x.id===id);o.status=status;log(admin,kind.toUpperCase()+'_'+status.toUpperCase(),o.name||o.no);commit()}};
+ const svc=USE_BACKEND?{...fake,...makeBackendSvc({db,commit,fake})}:fake;
  const go=p=>setPage(p);
  const signIn=u=>{setUser(u);setPage(u.role==='admin'?'a-overview':'dashboard')};
  const ctx={db,user:cur,svc,toast,go,page,dark};
  return <Ctx.Provider value={ctx}>
   <SimBanner/>
-  {!cur?<Auth onAuth={signIn}/>:<Shell dark={dark} setDark={setDark} onLogout={()=>{log(cur,'LOGOUT','Signed out');setUser(null)}}/>}
+  {!cur?<Auth onAuth={signIn}/>:<Shell dark={dark} setDark={setDark} onLogout={()=>{log(cur,'LOGOUT','Signed out');TOKEN=null;ROLE=null;setUser(null)}}/>}
   <div className="fixed bottom-4 right-4 z-[60] space-y-2">{toasts.map(t=><div key={t.id} className={cx('max-w-xs rounded-lg px-4 py-3 text-sm text-white shadow-lg',t.kind==='ok'?'bg-emerald-600':'bg-red-600')}>{t.msg}</div>)}</div>
  </Ctx.Provider>}
 
@@ -145,7 +250,7 @@ function Shell({dark,setDark,onLogout}){
    <button onClick={onLogout} className="m-3 flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm hover:bg-navy-800"><Ic n="out"/>Sign out</button>
   </aside>
   <div className="min-w-0 flex-1">
-   <header className="sticky top-0 z-20 flex items-center justify-between border-b border-slate-200 bg-white/90 px-4 py-3 backdrop-blur dark:border-slate-700/60 dark:bg-navy-900/90">
+       <header className="sticky top-0 z-20 flex items-center justify-between border-b border-slate-200 bg-white/90 px-4 py-3 backdrop-blur dark:border-slate-700/60 dark:bg-navy-900/90">
     <button className="lg:hidden" onClick={()=>setOpen(true)} aria-label="Menu"><Ic n="menu" c="w-6 h-6"/></button><span className="hidden text-sm text-slate-500 lg:block">Welcome back, {user.name}</span>
     <div className="flex items-center gap-2"><Btn v="gho" onClick={()=>setDark(!dark)} aria-label="Toggle theme"><Ic n={dark?'sun':'moon'}/></Btn><span className="grid h-9 w-9 place-items-center rounded-full bg-navy-700 text-sm font-semibold text-white">{user.name[0]}</span></div>
    </header>
@@ -224,7 +329,7 @@ function Transfer(){
    <Field label="Note (optional)"><input className={inp} maxLength={60} value={note} onChange={e=>setNote(e.target.value)}/></Field>
    <Btn className="w-full" onClick={check}>Review transfer</Btn></div></Card>
   {confirm&&<Modal title="Confirm transfer" onClose={()=>!busy&&setConfirm(false)}><dl className="space-y-1 text-sm"><div>From: <b>{f.nick} ••{f.no.slice(-4)}</b></div><div>To: <b>{recUser.name} ••{rec.no.slice(-4)}</b></div><div>Amount: <b>{fmt(n)}</b></div></dl><p className="mt-2 text-xs text-amber-600">Simulation only — no real money moves.</p><div className="mt-4 flex gap-2"><Btn v="out" className="flex-1" disabled={busy} onClick={()=>setConfirm(false)}>Cancel</Btn><Btn busy={busy} className="flex-1" onClick={run}>Confirm</Btn></div></Modal>}
-  {res&&(res.ok?<TxDetail t={res.t} title="✓ Transfer receipt" onClose={()=>setRes(null)}/>:<Modal title="Transfer failed" onClose={()=>setRes(null)}><p className="text-sm text-red-600">{res.msg}</p><Btn className="mt-4 w-full" onClick={()=>setRes(null)}>Close</Btn></Modal>)}</>}
+    {res&&(res.ok?<TxDetail t={res.t} title="✓ Transfer receipt" onClose={()=>setRes(null)}/>:<Modal title="Transfer failed" onClose={()=>setRes(null)}><p className="text-sm text-red-600">{res.msg}</p><Btn className="mt-4 w-full" onClick={()=>setRes(null)}>Close</Btn></Modal>)}</>}
 
 /* ---------- History ---------- */
 function Filters({q,setQ,from,setFrom,to,setTo,st,setSt,ty,setTy}){return <div className="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-5"><div className="relative lg:col-span-1"><span className="absolute left-2.5 top-2.5 text-slate-400"><Ic n="search"/></span><input className={inp+' pl-8'} placeholder="Search…" value={q} onChange={e=>setQ(e.target.value)}/></div><input type="date" className={inp} value={from} onChange={e=>setFrom(e.target.value)} aria-label="From date"/><input type="date" className={inp} value={to} onChange={e=>setTo(e.target.value)} aria-label="To date"/><select className={inp} value={st} onChange={e=>setSt(e.target.value)}><option value="">All statuses</option><option>completed</option><option>failed</option><option>pending</option></select><select className={inp} value={ty} onChange={e=>setTy(e.target.value)}><option value="">All types</option><option value="deposit">Deposit</option><option value="withdrawal">Withdrawal</option><option value="transfer">Transfer</option></select></div>}
@@ -422,22 +527,22 @@ function Profile(){
 /* ---------- Admin ---------- */
 const Stat=({l,v,s})=><Card><div className="text-sm text-slate-500">{l}</div><div className="mt-1 text-2xl font-bold text-navy-700 dark:text-blue-300">{v}</div>{s&&<div className="text-xs text-slate-500">{s}</div>}</Card>;
 function AOverview(){
- const {db}=useApp();const cust=db.users.filter(u=>u.role==='customer');const vol=db.txns.filter(t=>t.status==='completed').reduce((s,t)=>s+t.amount,0);
+ const {db,svc}=useApp();useEffect(()=>{svc.refreshAdmin&&svc.refreshAdmin()},[]);const cust=db.users.filter(u=>u.role==='customer'&&(!USE_BACKEND||u.customerId));const vol=db.txns.filter(t=>t.status==='completed').reduce((s,t)=>s+t.amount,0);
  const byType=['deposit','withdrawal','transfer'].map(k=>({name:typeLabel[k],value:db.txns.filter(t=>t.type===k).length}));const COL=['#2d5fb8','#f59e0b','#10b981'];
  return <><Title t="Admin Overview" sub="Platform summary (simulated data)"/><div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4"><Stat l="Customers" v={cust.length} s={cust.filter(u=>u.status==='active').length+' active'}/><Stat l="Accounts" v={db.accounts.length} s={fmt(db.accounts.reduce((s,a)=>s+a.balance,0))+' held'}/><Stat l="Transactions" v={db.txns.length} s={db.txns.filter(t=>t.status==='failed').length+' failed'}/><Stat l="Completed volume" v={fmt(vol)}/></div>
   <div className="mt-4 grid gap-4 lg:grid-cols-2"><Card><h2 className="mb-2 font-semibold">Transactions by type</h2><div className="h-56"><RC.ResponsiveContainer><RC.PieChart><RC.Pie data={byType} dataKey="value" nameKey="name" outerRadius={80} label>{byType.map((_,i)=><RC.Cell key={i} fill={COL[i]}/>)}</RC.Pie><RC.Tooltip/><RC.Legend/></RC.PieChart></RC.ResponsiveContainer></div></Card><Card><h2 className="mb-2 font-semibold">Latest audit events</h2>{db.audit.slice(0,6).map(a=><div key={a.id} className="border-b border-slate-100 py-2 text-sm last:border-0 dark:border-slate-800"><b>{a.action}</b> · {a.actor}<div className="text-xs text-slate-500">{dt(a.date)} — {a.detail}</div></div>)}</Card></div></>}
 function ACustomers(){
- const {db,svc,user,toast}=useApp();const [q,setQ]=useState('');const list=db.users.filter(u=>u.role==='customer'&&(u.name+u.email+u.phone).toLowerCase().includes(q.toLowerCase()));
+ const {db,svc,user,toast}=useApp();useEffect(()=>{svc.refreshAdmin&&svc.refreshAdmin()},[]);const [q,setQ]=useState('');const list=db.users.filter(u=>u.role==='customer'&&(!USE_BACKEND||u.customerId)&&(u.name+u.email+u.phone).toLowerCase().includes(q.toLowerCase()));
  const flip=async u=>{const s=u.status==='active'?'suspended':'active';await svc.setStatus(user,'user',u.id,s);toast(`${u.name} is now ${s}`)};
  return <><Title t="Customers" sub={`${list.length} customer(s)`}/><Card><input className={inp+' mb-4 max-w-sm'} placeholder="Search name, email, phone…" value={q} onChange={e=>setQ(e.target.value)}/><Table cols={['Name','Email','Phone','Accounts','Joined','Status','Action']} rows={list.map(u=>[u.name,u.email,u.phone,db.accounts.filter(a=>a.userId===u.id).length,dt(u.joined),<Badge s={u.status}/>,<Btn v="out" className="!py-1 !text-xs" onClick={()=>flip(u)}>{u.status==='active'?'Suspend':'Reactivate'}</Btn>])}/></Card></>}
 function AAccounts(){
- const {db,svc,user,toast}=useApp();const [q,setQ]=useState('');const [st,setSt]=useState('');const list=db.accounts.filter(a=>(a.no+a.nick+(db.users.find(u=>u.id===a.userId)?.name||'')).toLowerCase().includes(q.toLowerCase())&&(!st||a.status===st));
+ const {db,svc,user,toast}=useApp();useEffect(()=>{svc.refreshAdmin&&svc.refreshAdmin()},[]);const [q,setQ]=useState('');const [st,setSt]=useState('');const list=db.accounts.filter(a=>(a.no+a.nick+(db.users.find(u=>u.id===a.userId)?.name||'')).toLowerCase().includes(q.toLowerCase())&&(!st||a.status===st));
  const flip=async a=>{const s=a.status==='active'?'frozen':'active';await svc.setStatus(user,'account',a.id,s);toast(`${a.no} is now ${s}`)};
  return <><Title t="Account Monitoring"/><Card><div className="mb-4 flex flex-wrap gap-2"><input className={inp+' max-w-xs'} placeholder="Search…" value={q} onChange={e=>setQ(e.target.value)}/><select className={inp+' max-w-[10rem]'} value={st} onChange={e=>setSt(e.target.value)}><option value="">All</option><option>active</option><option>frozen</option></select></div><Table cols={['Account no.','Owner','Type','Balance','Status','Action']} rows={list.map(a=>[a.no,db.users.find(u=>u.id===a.userId)?.name,a.type,fmt(a.balance),<Badge s={a.status}/>,<Btn v="out" className="!py-1 !text-xs" onClick={()=>flip(a)}>{a.status==='active'?'Freeze':'Unfreeze'}</Btn>])}/></Card></>}
 function ATxns(){
- const {db}=useApp();const {out,props}=useFilter(db.txns,db);const [sel,setSel]=useState(null);
+ const {db,svc}=useApp();useEffect(()=>{svc.refreshAdmin&&svc.refreshAdmin()},[]);const {out,props}=useFilter(db.txns,db);const [sel,setSel]=useState(null);
  return <><Title t="Transaction Monitoring" sub={`${out.length} transaction(s)`}/><Card><Filters {...props}/><Table cols={['Date','Ref','Type','From','To','Amount','Status']} onRow={i=>setSel(out[i])} rows={out.slice(0,100).map(t=>[dt(t.date),t.id,typeLabel[t.type],t.from?acctName(db,t.from):'—',t.to?acctName(db,t.to):'—',fmt(t.amount),<Badge s={t.status}/>])}/></Card>{sel&&<TxDetail t={sel} onClose={()=>setSel(null)}/>}</>}
-function AAudit(){const {db}=useApp();return <><Title t="Audit Logs" sub="Actions recorded during this demo session"/><Card><Table cols={['Time','Actor','Action','Detail']} rows={db.audit.slice(0,150).map(a=>[dt(a.date),a.actor,<span className="font-mono text-xs">{a.action}</span>,a.detail])}/></Card></>}
+function AAudit(){const {db,svc}=useApp();useEffect(()=>{svc.refreshAdmin&&svc.refreshAdmin()},[]);return <><Title t="Audit Logs" sub={USE_BACKEND?"Recorded by the backend (latest 100)":"Actions recorded during this demo session"}/><Card><Table cols={['Time','Actor','Action','Detail']} rows={db.audit.slice(0,150).map(a=>[dt(a.date),a.actor,<span className="font-mono text-xs">{a.action}</span>,a.detail])}/></Card></>}
 
 ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
 </script></body></html>
