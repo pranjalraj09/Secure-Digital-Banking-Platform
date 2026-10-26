@@ -3,6 +3,7 @@ package com.fincore.nexus;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fincore.nexus.dto.request.CreateCustomerRequest;
 import com.fincore.nexus.dto.request.KycUpdateRequest;
+import com.fincore.nexus.dto.request.TransferRequest;
 import com.fincore.nexus.entity.Account;
 import com.fincore.nexus.entity.AccountType;
 import com.fincore.nexus.entity.Customer;
@@ -53,6 +54,7 @@ public class SecurityRbacIntegrationTest {
     private Customer customer1;
     private Customer customer2;
     private Account account1;
+    private Account account2;
     private String adminToken;
     private String tellerToken;
     private String customer1Token;
@@ -73,6 +75,9 @@ public class SecurityRbacIntegrationTest {
 
         account1 = new Account(UUID.randomUUID(), "1111-2222-3333", customer1, AccountType.CHECKING, "USD", BigDecimal.valueOf(500.00));
         accountRepository.save(account1);
+
+        account2 = new Account(UUID.randomUUID(), "4444-5555-6666", customer2, AccountType.SAVINGS, "USD", BigDecimal.valueOf(300.00));
+        accountRepository.save(account2);
 
         adminToken = "Bearer " + devJwtService.generateToken("admin@fincore.bank", "ADMIN", null);
         tellerToken = "Bearer " + devJwtService.generateToken("teller@fincore.bank", "TELLER", null);
@@ -133,6 +138,36 @@ public class SecurityRbacIntegrationTest {
 
         mockMvc.perform(patch("/api/customers/" + customer1.getId() + "/kyc")
                         .header("Authorization", customer1Token)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(req)))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    @DisplayName("Customer can execute transfer from their own account")
+    void testCustomerCanTransferFromOwnAccount() throws Exception {
+        TransferRequest req = new TransferRequest(account1.getId(), account1.getAccountNumber(),
+                account2.getId(), account2.getAccountNumber(), BigDecimal.valueOf(100.00), "Rent Payment", null);
+
+        mockMvc.perform(post("/api/accounts/" + account1.getId() + "/transactions/transfer")
+                        .header("Authorization", customer1Token)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(req)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.amount").value(100.00))
+                .andExpect(jsonPath("$.sourceResultingBalance").value(400.00))
+                .andExpect(jsonPath("$.targetResultingBalance").value(400.00));
+    }
+
+    @Test
+    @DisplayName("Customer cannot execute transfer from an account they do not own (Forbidden 403)")
+    void testCustomerCannotTransferFromOtherCustomerAccount() throws Exception {
+        TransferRequest req = new TransferRequest(account1.getId(), account1.getAccountNumber(),
+                account2.getId(), account2.getAccountNumber(), BigDecimal.valueOf(100.00), "Malicious Transfer", null);
+
+        // customer2 tries to transfer OUT OF customer1's account1
+        mockMvc.perform(post("/api/accounts/" + account1.getId() + "/transactions/transfer")
+                        .header("Authorization", customer2Token)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(req)))
                 .andExpect(status().isForbidden());

@@ -2,8 +2,10 @@ package com.fincore.nexus;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fincore.nexus.dto.request.DepositRequest;
+import com.fincore.nexus.dto.request.TransferRequest;
 import com.fincore.nexus.dto.request.WithdrawRequest;
 import com.fincore.nexus.dto.response.TransactionResponse;
+import com.fincore.nexus.dto.response.TransferResponse;
 import com.fincore.nexus.entity.Account;
 import com.fincore.nexus.entity.AccountStatus;
 import com.fincore.nexus.entity.AccountType;
@@ -16,6 +18,8 @@ import com.fincore.nexus.exception.AccountClosedException;
 import com.fincore.nexus.exception.AccountFrozenException;
 import com.fincore.nexus.exception.InsufficientFundsException;
 import com.fincore.nexus.exception.InvalidAmountException;
+import com.fincore.nexus.exception.ResourceNotFoundException;
+import com.fincore.nexus.exception.SameAccountTransferException;
 import com.fincore.nexus.repository.AccountRepository;
 import com.fincore.nexus.repository.TransactionRepository;
 import com.fincore.nexus.service.AccountService;
@@ -214,6 +218,212 @@ class TransactionServiceTest {
         assertThat(response.resultingBalance()).isEqualByComparingTo(BigDecimal.valueOf(1250.00));
 
         // DB lock, save, and event publish must NOT be called on deduplicated execution
+        verify(accountRepository, never()).findByIdWithLock(any());
+        verify(transactionRepository, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("Should successfully transfer funds between two accounts, update both balances, save both transactions, and publish event")
+    void testTransferSuccess() {
+        UUID srcId = UUID.randomUUID();
+        UUID tgtId = UUID.randomUUID();
+        Account srcAccount = new Account(srcId, "1111-2222-3333", new Customer(), AccountType.SAVINGS, "USD", BigDecimal.valueOf(5000.00));
+        srcAccount.setStatus(AccountStatus.ACTIVE);
+        Account tgtAccount = new Account(tgtId, "4444-5555-6666", new Customer(), AccountType.CHECKING, "USD", BigDecimal.valueOf(1000.00));
+        tgtAccount.setStatus(AccountStatus.ACTIVE);
+
+        TransferRequest req = new TransferRequest(srcId, "1111-2222-3333", tgtId, "4444-5555-6666",
+                BigDecimal.valueOf(1500.00), "Rent Payment", "TRF-TEST-001");
+
+        when(accountRepository.findByIdWithLock(srcId)).thenReturn(Optional.of(srcAccount));
+        when(accountRepository.findByIdWithLock(tgtId)).thenReturn(Optional.of(tgtAccount));
+        when(accountRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(transactionRepository.save(any(Transaction.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        TransferResponse response = transactionService.transfer(srcId, req, null, "customer@fincore.bank", "127.0.0.1");
+
+        assertThat(response).isNotNull();
+        assertThat(response.amount()).isEqualByComparingTo(BigDecimal.valueOf(1500.00));
+        assertThat(response.sourcePreviousBalance()).isEqualByComparingTo(BigDecimal.valueOf(5000.00));
+        assertThat(response.sourceResultingBalance()).isEqualByComparingTo(BigDecimal.valueOf(3500.00));
+        assertThat(response.targetPreviousBalance()).isEqualByComparingTo(BigDecimal.valueOf(1000.00));
+        assertThat(response.targetResultingBalance()).isEqualByComparingTo(BigDecimal.valueOf(2500.00));
+        assertThat(srcAccount.getBalance()).isEqualByComparingTo(BigDecimal.valueOf(3500.00));
+        assertThat(tgtAccount.getBalance()).isEqualByComparingTo(BigDecimal.valueOf(2500.00));
+
+        // Both caches evicted
+        verify(accountService).evictBalanceCache(srcId);
+        verify(accountService).evictBalanceCache(tgtId);
+
+        // Event published
+        verify(eventPublisher).publishEvent(any(TransactionCompletedEvent.class));
+    }
+
+    @Test
+    @DisplayName("Should reject transfer when source account has insufficient funds")
+    void testTransferInsufficientFunds() {
+        UUID srcId = UUID.randomUUID();
+        UUID tgtId = UUID.randomUUID();
+        Account srcAccount = new Account(srcId, "1111-2222-3333", new Customer(), AccountType.SAVINGS, "USD", BigDecimal.valueOf(200.00));
+        srcAccount.setStatus(AccountStatus.ACTIVE);
+        Account tgtAccount = new Account(tgtId, "4444-5555-6666", new Customer(), AccountType.CHECKING, "USD", BigDecimal.valueOf(1000.00));
+        tgtAccount.setStatus(AccountStatus.ACTIVE);
+
+        TransferRequest req = new TransferRequest(srcId, "1111-2222-3333", tgtId, "4444-5555-6666",
+                BigDecimal.valueOf(500.00), "Transfer attempt", null);
+
+        when(accountRepository.findByIdWithLock(srcId)).thenReturn(Optional.of(srcAccount));
+        when(accountRepository.findByIdWithLock(tgtId)).thenReturn(Optional.of(tgtAccount));
+
+        assertThatThrownBy(() -> transactionService.transfer(srcId, req, null, "customer@fincore.bank", "127.0.0.1"))
+                .isInstanceOf(InsufficientFundsException.class)
+                .hasMessageContaining("Insufficient funds");
+
+        // Neither account balance modified
+        assertThat(srcAccount.getBalance()).isEqualByComparingTo(BigDecimal.valueOf(200.00));
+        assertThat(tgtAccount.getBalance()).isEqualByComparingTo(BigDecimal.valueOf(1000.00));
+        verify(accountRepository, never()).save(any());
+        verify(transactionRepository, never()).save(any());
+        verify(eventPublisher, never()).publishEvent(any());
+    }
+
+    @Test
+    @DisplayName("Should reject transfer when destination account is missing")
+    void testTransferMissingDestinationAccount() {
+        UUID srcId = UUID.randomUUID();
+        UUID missingTgtId = UUID.randomUUID();
+        Account srcAccount = new Account(srcId, "1111-2222-3333", new Customer(), AccountType.SAVINGS, "USD", BigDecimal.valueOf(1000.00));
+        TransferRequest req = new TransferRequest(srcId, null, missingTgtId, null,
+                BigDecimal.valueOf(100.00), "Missing destination", null);
+
+        org.mockito.Mockito.lenient().when(accountRepository.findByIdWithLock(srcId)).thenReturn(Optional.of(srcAccount));
+        org.mockito.Mockito.lenient().when(accountRepository.findByIdWithLock(missingTgtId)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> transactionService.transfer(srcId, req, null, "user", "ip"))
+                .isInstanceOf(ResourceNotFoundException.class)
+                .hasMessageContaining("Destination account not found");
+    }
+
+    @Test
+    @DisplayName("Should reject transfer when source account is missing")
+    void testTransferMissingSourceAccount() {
+        UUID missingSrcId = UUID.randomUUID();
+        UUID tgtId = UUID.randomUUID();
+        Account tgtAccount = new Account(tgtId, "4444-5555-6666", new Customer(), AccountType.CHECKING, "USD", BigDecimal.valueOf(1000.00));
+        TransferRequest req = new TransferRequest(missingSrcId, null, tgtId, null,
+                BigDecimal.valueOf(100.00), "Missing source", null);
+
+        org.mockito.Mockito.lenient().when(accountRepository.findByIdWithLock(tgtId)).thenReturn(Optional.of(tgtAccount));
+        org.mockito.Mockito.lenient().when(accountRepository.findByIdWithLock(missingSrcId)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> transactionService.transfer(missingSrcId, req, null, "user", "ip"))
+                .isInstanceOf(ResourceNotFoundException.class)
+                .hasMessageContaining("Source account not found");
+    }
+
+    @Test
+    @DisplayName("Should reject transfer with non-positive or invalid amount")
+    void testTransferInvalidAmount() {
+        UUID srcId = UUID.randomUUID();
+        TransferRequest zeroReq = new TransferRequest(srcId, null, UUID.randomUUID(), null,
+                BigDecimal.ZERO, "Zero Transfer", null);
+        TransferRequest negativeReq = new TransferRequest(srcId, null, UUID.randomUUID(), null,
+                BigDecimal.valueOf(-100.00), "Negative Transfer", null);
+        TransferRequest excessDecimalsReq = new TransferRequest(srcId, null, UUID.randomUUID(), null,
+                new BigDecimal("10.555"), "3 Decimals Transfer", null);
+
+        assertThatThrownBy(() -> transactionService.transfer(srcId, zeroReq, null, "user", "ip"))
+                .isInstanceOf(InvalidAmountException.class);
+
+        assertThatThrownBy(() -> transactionService.transfer(srcId, negativeReq, null, "user", "ip"))
+                .isInstanceOf(InvalidAmountException.class);
+
+        assertThatThrownBy(() -> transactionService.transfer(srcId, excessDecimalsReq, null, "user", "ip"))
+                .isInstanceOf(InvalidAmountException.class);
+    }
+
+    @Test
+    @DisplayName("Should reject transfer to the same account")
+    void testTransferSameAccount() {
+        UUID sameId = UUID.randomUUID();
+        Account sameAccount = new Account(sameId, "1111-2222-3333", new Customer(), AccountType.SAVINGS, "USD", BigDecimal.valueOf(5000.00));
+        sameAccount.setStatus(AccountStatus.ACTIVE);
+
+        TransferRequest req = new TransferRequest(sameId, "1111-2222-3333", sameId, "1111-2222-3333",
+                BigDecimal.valueOf(100.00), "Self Transfer", null);
+
+        assertThatThrownBy(() -> transactionService.transfer(sameId, req, null, "user", "ip"))
+                .isInstanceOf(SameAccountTransferException.class)
+                .hasMessageContaining("Cannot transfer to the same account");
+    }
+
+    @Test
+    @DisplayName("Should reject transfer when source or destination account is FROZEN")
+    void testTransferFrozenAccount() {
+        UUID srcId = UUID.randomUUID();
+        UUID tgtId = UUID.randomUUID();
+        Account frozenSrc = new Account(srcId, "1111-2222-3333", new Customer(), AccountType.SAVINGS, "USD", BigDecimal.valueOf(5000.00));
+        frozenSrc.setStatus(AccountStatus.FROZEN);
+        Account activeTgt = new Account(tgtId, "4444-5555-6666", new Customer(), AccountType.CHECKING, "USD", BigDecimal.valueOf(1000.00));
+        activeTgt.setStatus(AccountStatus.ACTIVE);
+
+        TransferRequest req = new TransferRequest(srcId, null, tgtId, null,
+                BigDecimal.valueOf(100.00), "Transfer from frozen", null);
+
+        when(accountRepository.findByIdWithLock(srcId)).thenReturn(Optional.of(frozenSrc));
+        when(accountRepository.findByIdWithLock(tgtId)).thenReturn(Optional.of(activeTgt));
+
+        assertThatThrownBy(() -> transactionService.transfer(srcId, req, null, "user", "ip"))
+                .isInstanceOf(AccountFrozenException.class);
+    }
+
+    @Test
+    @DisplayName("Should reject transfer when source or destination account is CLOSED")
+    void testTransferClosedAccount() {
+        UUID srcId = UUID.randomUUID();
+        UUID tgtId = UUID.randomUUID();
+        Account activeSrc = new Account(srcId, "1111-2222-3333", new Customer(), AccountType.SAVINGS, "USD", BigDecimal.valueOf(5000.00));
+        activeSrc.setStatus(AccountStatus.ACTIVE);
+        Account closedTgt = new Account(tgtId, "4444-5555-6666", new Customer(), AccountType.CHECKING, "USD", BigDecimal.ZERO);
+        closedTgt.setStatus(AccountStatus.CLOSED);
+
+        TransferRequest req = new TransferRequest(srcId, null, tgtId, null,
+                BigDecimal.valueOf(100.00), "Transfer to closed", null);
+
+        when(accountRepository.findByIdWithLock(srcId)).thenReturn(Optional.of(activeSrc));
+        when(accountRepository.findByIdWithLock(tgtId)).thenReturn(Optional.of(closedTgt));
+
+        assertThatThrownBy(() -> transactionService.transfer(srcId, req, null, "user", "ip"))
+                .isInstanceOf(AccountClosedException.class);
+    }
+
+    @Test
+    @DisplayName("Should return cached transfer response on duplicate idempotency key without duplicate balance mutations")
+    void testTransferIdempotencyDeduplication() throws Exception {
+        UUID srcId = UUID.randomUUID();
+        UUID tgtId = UUID.randomUUID();
+        TransferRequest req = new TransferRequest(srcId, "1111-2222-3333", tgtId, "4444-5555-6666",
+                BigDecimal.valueOf(500.00), "Rent Payment", "TRF-REF-100");
+        String idempotencyKey = "idemp-transfer-key-999";
+
+        TransferResponse cachedResponse = new TransferResponse(
+                UUID.randomUUID(), srcId, srcId, "1111-2222-3333", "1111-2222-3333",
+                tgtId, "4444-5555-6666", TransactionType.TRANSFER,
+                BigDecimal.valueOf(500.00), BigDecimal.valueOf(5000.00), BigDecimal.valueOf(5000.00),
+                BigDecimal.valueOf(4500.00), BigDecimal.valueOf(4500.00), BigDecimal.valueOf(1000.00),
+                BigDecimal.valueOf(1500.00), com.fincore.nexus.entity.TransactionStatus.COMPLETED,
+                "Rent Payment", "TRF-REF-100", null, java.time.Instant.now()
+        );
+
+        IdempotencyRecord record = new IdempotencyRecord(idempotencyKey, "hash999", 200, objectMapper.writeValueAsString(cachedResponse));
+        when(idempotencyService.getRecord(idempotencyKey)).thenReturn(Optional.of(record));
+
+        TransferResponse response = transactionService.transfer(srcId, req, idempotencyKey, "user", "ip");
+
+        assertThat(response).isNotNull();
+        assertThat(response.sourceResultingBalance()).isEqualByComparingTo(BigDecimal.valueOf(4500.00));
+        assertThat(response.targetResultingBalance()).isEqualByComparingTo(BigDecimal.valueOf(1500.00));
+
         verify(accountRepository, never()).findByIdWithLock(any());
         verify(transactionRepository, never()).save(any());
     }

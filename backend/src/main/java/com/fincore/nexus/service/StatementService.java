@@ -59,6 +59,12 @@ public class StatementService {
                 totalDeposits = totalDeposits.add(txn.getAmount());
             } else if (txn.getTransactionType() == TransactionType.WITHDRAWAL) {
                 totalWithdrawals = totalWithdrawals.add(txn.getAmount());
+            } else if (txn.getTransactionType() == TransactionType.TRANSFER) {
+                if (txn.getResultingBalance().compareTo(txn.getPreviousBalance()) < 0) {
+                    totalWithdrawals = totalWithdrawals.add(txn.getAmount());
+                } else {
+                    totalDeposits = totalDeposits.add(txn.getAmount());
+                }
             }
         }
 
