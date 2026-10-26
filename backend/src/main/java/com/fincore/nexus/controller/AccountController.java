@@ -2,12 +2,14 @@ package com.fincore.nexus.controller;
 
 import com.fincore.nexus.dto.request.CreateAccountRequest;
 import com.fincore.nexus.dto.request.DepositRequest;
+import com.fincore.nexus.dto.request.TransferRequest;
 import com.fincore.nexus.dto.request.UpdateAccountStatusRequest;
 import com.fincore.nexus.dto.request.WithdrawRequest;
 import com.fincore.nexus.dto.response.AccountBalanceResponse;
 import com.fincore.nexus.dto.response.AccountResponse;
 import com.fincore.nexus.dto.response.AccountStatementResponse;
 import com.fincore.nexus.dto.response.TransactionResponse;
+import com.fincore.nexus.dto.response.TransferResponse;
 import com.fincore.nexus.service.AccountService;
 import com.fincore.nexus.service.StatementService;
 import com.fincore.nexus.service.TransactionService;
@@ -136,6 +138,33 @@ public class AccountController {
         String actor = auth != null ? auth.getName() : "SYSTEM";
         String ip = request.getRemoteAddr();
         return ResponseEntity.ok(transactionService.withdraw(id, req, idempotencyKey, actor, ip));
+    }
+
+    @PostMapping("/{id}/transactions/transfer")
+    @PreAuthorize("hasRole('TELLER') or hasRole('ADMIN') or @accountSecurityService.isAccountOwner(authentication, #id)")
+    @Operation(summary = "Transfer Funds", description = "Execute atomic transfer between accounts with pessimistic balance locks, overdraft check, and Kafka event dispatch")
+    public ResponseEntity<TransferResponse> transfer(
+            @PathVariable UUID id,
+            @Valid @RequestBody TransferRequest req,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            Authentication auth,
+            HttpServletRequest request) {
+        String actor = auth != null ? auth.getName() : "SYSTEM";
+        String ip = request.getRemoteAddr();
+        return ResponseEntity.ok(transactionService.transfer(id, req, idempotencyKey, actor, ip));
+    }
+
+    @PostMapping("/transfer")
+    @PreAuthorize("hasRole('TELLER') or hasRole('ADMIN') or @accountSecurityService.isTransferSourceAuthorized(authentication, #req)")
+    @Operation(summary = "Transfer Funds (Alternative Endpoint)", description = "Execute atomic transfer with source account specified in request body")
+    public ResponseEntity<TransferResponse> transferAlternative(
+            @Valid @RequestBody TransferRequest req,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            Authentication auth,
+            HttpServletRequest request) {
+        String actor = auth != null ? auth.getName() : "SYSTEM";
+        String ip = request.getRemoteAddr();
+        return ResponseEntity.ok(transactionService.transfer(req.sourceAccountId(), req, idempotencyKey, actor, ip));
     }
 
     @GetMapping("/{id}/transactions")

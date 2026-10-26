@@ -1,6 +1,7 @@
 package com.fincore.nexus;
 
 import com.fincore.nexus.dto.request.DepositRequest;
+import com.fincore.nexus.dto.request.TransferRequest;
 import com.fincore.nexus.dto.request.WithdrawRequest;
 import com.fincore.nexus.entity.Account;
 import com.fincore.nexus.entity.AccountType;
@@ -144,5 +145,72 @@ public class ConcurrentTransactionIntegrationTest {
         assertThat(successfulDeposits.get()).isEqualTo(10);
         assertThat(finalAccount.getBalance().setScale(2, RoundingMode.HALF_EVEN))
                 .isEqualByComparingTo(BigDecimal.valueOf(2000.00));
+    }
+
+    @Test
+    @DisplayName("Should maintain total financial balance and prevent deadlocks under concurrent cross-transfers")
+    void testConcurrentTransfersSafety() throws InterruptedException {
+        // Create two accounts with $1,000.00 each (Total = $2,000.00)
+        Customer customer = customerRepository.findById(accountRepository.findById(accountId).orElseThrow().getCustomer().getId()).orElseThrow();
+        Account targetAccount = new Account(UUID.randomUUID(), "CONCUR-TGT-" + System.currentTimeMillis(),
+                customer, AccountType.SAVINGS, "USD", BigDecimal.valueOf(1000.00));
+        Account savedTarget = accountRepository.save(targetAccount);
+        UUID targetId = savedTarget.getId();
+
+        int numOperationsPerDirection = 5;
+        int totalThreads = numOperationsPerDirection * 2;
+        BigDecimal transferAmount = BigDecimal.valueOf(50.00);
+
+        ExecutorService executor = Executors.newFixedThreadPool(totalThreads);
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch endLatch = new CountDownLatch(totalThreads);
+
+        AtomicInteger successfulTransfers = new AtomicInteger(0);
+
+        // Direction 1: accountId -> targetId (10 threads)
+        for (int i = 0; i < numOperationsPerDirection; i++) {
+            executor.submit(() -> {
+                try {
+                    startLatch.await();
+                    transactionService.transfer(accountId,
+                            new TransferRequest(accountId, null, targetId, null, transferAmount, "A to B", null),
+                            null, "concur-user", "127.0.0.1");
+                    successfulTransfers.incrementAndGet();
+                } catch (Exception ex) {
+                    // unexpected error
+                } finally {
+                    endLatch.countDown();
+                }
+            });
+        }
+
+        // Direction 2: targetId -> accountId (5 threads)
+        for (int i = 0; i < numOperationsPerDirection; i++) {
+            executor.submit(() -> {
+                try {
+                    startLatch.await();
+                    transactionService.transfer(targetId,
+                            new TransferRequest(targetId, null, accountId, null, transferAmount, "B to A", null),
+                            null, "concur-user", "127.0.0.1");
+                    successfulTransfers.incrementAndGet();
+                } catch (Exception ex) {
+                    // unexpected error
+                } finally {
+                    endLatch.countDown();
+                }
+            });
+        }
+
+        startLatch.countDown();
+        endLatch.await();
+        executor.shutdown();
+
+        Account finalSrc = accountRepository.findById(accountId).orElseThrow();
+        Account finalTgt = accountRepository.findById(targetId).orElseThrow();
+
+        assertThat(successfulTransfers.get()).isEqualTo(totalThreads);
+        // Invariant: sum of balances across both accounts must equal the initial $2,000.00
+        BigDecimal totalBalance = finalSrc.getBalance().add(finalTgt.getBalance()).setScale(2, RoundingMode.HALF_EVEN);
+        assertThat(totalBalance).isEqualByComparingTo(BigDecimal.valueOf(2000.00));
     }
 }

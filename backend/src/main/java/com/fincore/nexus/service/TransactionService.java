@@ -1,8 +1,10 @@
 package com.fincore.nexus.service;
 
 import com.fincore.nexus.dto.request.DepositRequest;
+import com.fincore.nexus.dto.request.TransferRequest;
 import com.fincore.nexus.dto.request.WithdrawRequest;
 import com.fincore.nexus.dto.response.TransactionResponse;
+import com.fincore.nexus.dto.response.TransferResponse;
 import com.fincore.nexus.entity.Account;
 import com.fincore.nexus.entity.AccountStatus;
 import com.fincore.nexus.entity.IdempotencyRecord;
@@ -15,6 +17,7 @@ import com.fincore.nexus.exception.AccountFrozenException;
 import com.fincore.nexus.exception.InsufficientFundsException;
 import com.fincore.nexus.exception.InvalidAmountException;
 import com.fincore.nexus.exception.ResourceNotFoundException;
+import com.fincore.nexus.exception.SameAccountTransferException;
 import com.fincore.nexus.repository.AccountRepository;
 import com.fincore.nexus.repository.TransactionRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -239,6 +242,166 @@ public class TransactionService {
         TransactionResponse response = TransactionResponse.fromEntity(savedTxn);
 
         // Save idempotency record
+        if (idempotencyKey != null && !idempotencyKey.isBlank()) {
+            idempotencyService.saveRecord(idempotencyKey, req, 200, response);
+        }
+
+        return response;
+    }
+
+    @Transactional
+    public TransferResponse transfer(UUID sourceAccountId, TransferRequest req, String idempotencyKey, String actor, String ip) {
+        // Idempotency check
+        if (idempotencyKey != null && !idempotencyKey.isBlank()) {
+            Optional<IdempotencyRecord> existing = idempotencyService.getRecord(idempotencyKey);
+            if (existing.isPresent()) {
+                idempotencyService.validateRequestHash(existing.get(), req);
+                try {
+                    log.info("Returning cached idempotent transfer response for key: {}", idempotencyKey);
+                    return objectMapper.readValue(existing.get().getResponseBody(), TransferResponse.class);
+                } catch (Exception ex) {
+                    log.warn("Failed to deserialize cached idempotency response: {}", ex.getMessage());
+                }
+            }
+        }
+
+        validateAmount(req.amount());
+
+        UUID resolvedSourceId = sourceAccountId != null ? sourceAccountId : req.sourceAccountId();
+        if (resolvedSourceId == null && req.sourceAccountNumber() != null && !req.sourceAccountNumber().isBlank()) {
+            Account srcAccount = accountRepository.findByAccountNumber(req.sourceAccountNumber().trim())
+                    .orElseThrow(() -> new ResourceNotFoundException("Source account not found with account number: " + req.sourceAccountNumber().trim()));
+            resolvedSourceId = srcAccount.getId();
+        }
+        if (resolvedSourceId == null) {
+            throw new ResourceNotFoundException("Source account identifier (sourceAccountId or sourceAccountNumber) is required for transfer.");
+        }
+        final UUID actualSourceId = resolvedSourceId;
+
+        UUID resolvedTargetId = req.targetAccountId();
+        if (resolvedTargetId == null && req.targetAccountNumber() != null && !req.targetAccountNumber().isBlank()) {
+            Account tgtAccount = accountRepository.findByAccountNumber(req.targetAccountNumber().trim())
+                    .orElseThrow(() -> new ResourceNotFoundException("Destination account not found with account number: " + req.targetAccountNumber().trim()));
+            resolvedTargetId = tgtAccount.getId();
+        }
+        if (resolvedTargetId == null) {
+            throw new ResourceNotFoundException("Destination account identifier (targetAccountId or targetAccountNumber) is required.");
+        }
+        final UUID actualTargetId = resolvedTargetId;
+
+        if (actualSourceId.equals(actualTargetId)) {
+            throw new SameAccountTransferException("Cannot transfer to the same account: " + actualSourceId);
+        }
+
+        // Pessimistic write locks acquired in deterministic order to prevent deadlocks
+        Account source;
+        Account target;
+        if (actualSourceId.compareTo(actualTargetId) < 0) {
+            source = accountRepository.findByIdWithLock(actualSourceId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Source account not found with ID: " + actualSourceId));
+            target = accountRepository.findByIdWithLock(actualTargetId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Destination account not found with ID: " + actualTargetId));
+        } else {
+            target = accountRepository.findByIdWithLock(actualTargetId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Destination account not found with ID: " + actualTargetId));
+            source = accountRepository.findByIdWithLock(actualSourceId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Source account not found with ID: " + actualSourceId));
+        }
+
+        if (source.getAccountNumber().equalsIgnoreCase(target.getAccountNumber())) {
+            throw new SameAccountTransferException("Cannot transfer to the same account: " + source.getAccountNumber());
+        }
+
+        validateAccountOperable(source, "transfer source", actor, ip);
+        validateAccountOperable(target, "transfer destination", actor, ip);
+
+        if (source.getCurrency() != null && target.getCurrency() != null && !source.getCurrency().equalsIgnoreCase(target.getCurrency())) {
+            throw new IllegalArgumentException("Cross-currency transfers are not supported. Source: " + source.getCurrency() + ", Target: " + target.getCurrency());
+        }
+
+        BigDecimal normalizedAmount = req.amount().setScale(4, RoundingMode.HALF_EVEN);
+        BigDecimal sourcePrevBalance = source.getBalance();
+
+        if (sourcePrevBalance.compareTo(normalizedAmount) < 0) {
+            String reason = String.format("Insufficient funds: Requested %s %s, available balance %s %s",
+                    normalizedAmount.setScale(2, RoundingMode.HALF_EVEN),
+                    source.getCurrency(),
+                    sourcePrevBalance.setScale(2, RoundingMode.HALF_EVEN),
+                    source.getCurrency());
+
+            auditService.logAction(actor, "TRANSFER_REJECTED", "ACCOUNT", actualSourceId.toString(), "FAILURE", ip, reason);
+            throw new InsufficientFundsException(reason);
+        }
+
+        BigDecimal sourceNewBalance = sourcePrevBalance.subtract(normalizedAmount);
+        source.setBalance(sourceNewBalance);
+        accountRepository.save(source);
+
+        BigDecimal targetPrevBalance = target.getBalance();
+        BigDecimal targetNewBalance = targetPrevBalance.add(normalizedAmount);
+        target.setBalance(targetNewBalance);
+        accountRepository.save(target);
+
+        String baseRef = (req.referenceId() != null && !req.referenceId().isBlank())
+                ? req.referenceId()
+                : "TRF-" + System.currentTimeMillis() + "-" + UUID.randomUUID().toString().substring(0, 8);
+
+        String note = (req.description() != null && !req.description().isBlank())
+                ? req.description().trim()
+                : "Fund Transfer";
+
+        Transaction debitTxn = new Transaction(
+                UUID.randomUUID(),
+                source,
+                TransactionType.TRANSFER,
+                normalizedAmount,
+                sourcePrevBalance,
+                sourceNewBalance,
+                TransactionStatus.COMPLETED,
+                note + " -> " + target.getAccountNumber(),
+                baseRef + "-DEBIT"
+        );
+        Transaction savedDebit = transactionRepository.save(debitTxn);
+
+        Transaction creditTxn = new Transaction(
+                UUID.randomUUID(),
+                target,
+                TransactionType.TRANSFER,
+                normalizedAmount,
+                targetPrevBalance,
+                targetNewBalance,
+                TransactionStatus.COMPLETED,
+                note + " <- " + source.getAccountNumber(),
+                baseRef + "-CREDIT"
+        );
+        Transaction savedCredit = transactionRepository.save(creditTxn);
+
+        accountService.evictBalanceCache(source.getId());
+        accountService.evictBalanceCache(target.getId());
+
+        TransactionCompletedEvent event = new TransactionCompletedEvent(
+                savedDebit.getId(),
+                source.getId(),
+                source.getAccountNumber(),
+                TransactionType.TRANSFER,
+                savedDebit.getAmount().setScale(2, RoundingMode.HALF_EVEN),
+                savedDebit.getResultingBalance().setScale(2, RoundingMode.HALF_EVEN),
+                savedDebit.getStatus(),
+                baseRef,
+                savedDebit.getTimestamp()
+        );
+        applicationEventPublisher.publishEvent(event);
+
+        auditService.logAction(actor, "TRANSFER", "ACCOUNT", source.getId().toString(), "SUCCESS", ip,
+                String.format("Transferred %s %s from account %s to account %s (ref: %s)",
+                        savedDebit.getAmount().setScale(2, RoundingMode.HALF_EVEN),
+                        source.getCurrency(),
+                        source.getAccountNumber(),
+                        target.getAccountNumber(),
+                        baseRef));
+
+        TransferResponse response = TransferResponse.of(savedDebit, savedCredit);
+
         if (idempotencyKey != null && !idempotencyKey.isBlank()) {
             idempotencyService.saveRecord(idempotencyKey, req, 200, response);
         }
