@@ -93,11 +93,13 @@ async function asStaff(fn){const k=[TOKEN,ROLE];await getToken('teller@fincore.b
 const toAcct=(r,userId,old)=>({id:r.id,no:r.accountNumber,userId,type:r.accountType==='CHECKING'?'Current':'Savings',
  nick:(old&&old.nick)||(r.accountType==='CHECKING'?'Current Account':'Savings Account'),
  balance:Number(r.balance),status:String(r.status||'ACTIVE').toLowerCase(),opened:r.createdAt});
-const toTxn=r=>{const w=String(r.transactionType).toUpperCase()==='WITHDRAWAL';const st=String(r.status).toUpperCase();
+const toTxn=r=>{const ty=String(r.transactionType).toUpperCase();const tr=ty==='TRANSFER';
+ const out=tr?!/-CREDIT$/.test(String(r.referenceId||'')):ty==='WITHDRAWAL';   // does money leave this account?
+ const st=String(r.status).toUpperCase();
  const status=st==='COMPLETED'?'completed':(st==='FAILED'||st==='REJECTED')?'failed':'pending';
- return {id:r.id,date:r.timestamp,type:w?'withdrawal':'deposit',amount:Number(r.amount),
-  desc:(r.description||(w?'Cash withdrawal':'Cash deposit'))+(status==='failed'&&r.failureReason?' — '+r.failureReason:''),
-  from:w?r.accountId:null,to:w?null:r.accountId,status,note:''}};
+ return {id:r.id,date:r.timestamp,type:tr?'transfer':out?'withdrawal':'deposit',amount:Number(r.amount),
+  desc:(r.description||(tr?'Fund Transfer':out?'Cash withdrawal':'Cash deposit'))+(status==='failed'&&r.failureReason?' — '+r.failureReason:''),
+  from:out?r.accountId:null,to:out?null:r.accountId,status,note:''}};
 function upsertAcct(db,a){const i=db.accounts.findIndex(x=>x.id===a.id);if(i>=0)db.accounts[i]=a;else db.accounts.push(a)}
 function setTxns(db,accId,list){db.txns=db.txns.filter(t=>t.from!==accId&&t.to!==accId).concat(list);db.txns.sort((a,b)=>String(b.date).localeCompare(String(a.date)))}
 // remove the original made-up accounts/transactions (their ids are not real backend ids)
@@ -153,7 +155,16 @@ function makeBackendSvc({db,commit,fake}){
    const a=toAcct(r,u.id,{nick:nick||type+' Account'});upsertAcct(db,a);commit();return a},
   deposit:(u,id,amt,note)=>money(u,id,amt,note,'deposit'),
   withdraw:(u,id,amt,note)=>money(u,id,amt,note,'withdraw'),
-  async transfer(){throw Error('Transfer is not available yet: the backend transfer API is still being built.')},
+  async transfer(u,fromId,toNo,amt,note){
+   const a=db.accounts.find(x=>x.id===fromId);if(!a)throw Error('Sender account not found.');
+   const r=await api('/api/accounts/'+fromId+'/transactions/transfer','POST',{targetAccountNumber:String(toNo).trim().toUpperCase(),amount:amt,description:note||'Fund Transfer',referenceId:'WEB-'+Date.now()+'-'+Math.random().toString(36).slice(2,6)});
+   a.balance=Number(r.sourceResultingBalance);
+   const own=db.accounts.find(x=>x.id===r.targetAccountId);          // recipient is also one of this user's own accounts
+   if(own)own.balance=Number(r.targetResultingBalance);
+   const debit={id:r.id,date:r.timestamp,type:'transfer',amount:Number(r.amount),desc:r.description||'Fund Transfer',from:fromId,to:null,status:'completed',note};
+   if(own)db.txns.unshift({...debit,id:r.id+'-credit',desc:(note||'Fund Transfer')+' <- '+a.no,from:null,to:own.id});
+   db.txns.unshift(debit);commit();
+   return {...debit,to:r.targetAccountId}},                           // receipt shows both sides
   async setStatus(admin,kind,id,status){
    if(kind==='account'&&isUuid(id)){
     await api('/api/accounts/'+id+'/status','PATCH',{status:status==='frozen'?'FROZEN':'ACTIVE',reason:'Changed from admin console'});
@@ -164,7 +175,6 @@ function makeBackendSvc({db,commit,fake}){
 /* ---------- BACKEND CONNECTION (added) — end ---------- */
 
 const Ctx=createContext();const useApp=()=>useContext(Ctx);
-
 /* ---------- UI primitives ---------- */
 const Btn=({v='pri',className,busy,children,...p})=><button {...p} disabled={p.disabled||busy} className={cx('inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed',v==='pri'&&'bg-navy-700 text-white hover:bg-navy-600 dark:bg-navy-500 dark:hover:bg-navy-600',v==='out'&&'border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800',v==='dng'&&'bg-red-600 text-white hover:bg-red-700',v==='gho'&&'hover:bg-slate-100 dark:hover:bg-slate-800',className)}>{busy&&<span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"/>}{children}</button>;
 const Card=({className,children})=><div className={cx('rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700/60 dark:bg-navy-900',className)}>{children}</div>;
@@ -246,7 +256,7 @@ function Shell({dark,setDark,onLogout}){
   <aside className={cx('fixed z-40 flex h-full w-64 flex-col bg-navy-900 text-slate-200 transition-transform lg:static lg:translate-x-0',open?'translate-x-0':'-translate-x-full')}>
    <div className="flex items-center gap-2 p-5 text-lg font-bold text-white"><Ic n="bank" c="w-6 h-6"/>FinCore Nexus</div>
    {user.role==='admin'&&<div className="mx-4 mb-2 rounded bg-navy-600 px-2 py-1 text-xs">ADMIN CONSOLE</div>}
-   <nav className="flex-1 space-y-1 px-3">{nav.map(([k,l,i])=><button key={k} onClick={()=>{go(k);setOpen(false)}} className={cx('flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm',page===k?'bg-navy-600 text-white':'hover:bg-navy-800')}><Ic n={i}/>{l}</button>)}</nav>
+      <nav className="flex-1 space-y-1 px-3">{nav.map(([k,l,i])=><button key={k} onClick={()=>{go(k);setOpen(false)}} className={cx('flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm',page===k?'bg-navy-600 text-white':'hover:bg-navy-800')}><Ic n={i}/>{l}</button>)}</nav>
    <button onClick={onLogout} className="m-3 flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm hover:bg-navy-800"><Ic n="out"/>Sign out</button>
   </aside>
   <div className="min-w-0 flex-1">
@@ -314,22 +324,22 @@ function Transfer(){
  const {user,svc,toast,db}=useApp();const {accts}=useMine();const [from,setFrom]=useState(accts[0]?.id||'');const [to,setTo]=useState('');const [amt,setAmt]=useState('');const [note,setNote]=useState('');const [err,setErr]=useState({});
  const [confirm,setConfirm]=useState(false);const [busy,setBusy]=useState(false);const [res,setRes]=useState(null);
  const f=accts.find(a=>a.id===from);const rec=db.accounts.find(a=>a.no===to.trim().toUpperCase());const recUser=rec&&db.users.find(u=>u.id===rec.userId);const n=parseFloat(amt);
- const check=()=>{const e={};if(!f)e.from='Select a sender account.';if(!to.trim())e.to='Enter or pick a recipient account number.';else if(!rec)e.to='No FinCore account found with that number.';else if(rec.id===from)e.to='Cannot transfer to the same account.';else if(rec.status!=='active')e.to='Recipient account is not active.';
+ const check=()=>{const e={};if(!f)e.from='Select a sender account.';if(!to.trim())e.to='Enter or pick a recipient account number.';else if(!rec&&!USE_BACKEND)e.to='No FinCore account found with that number.';else if(rec&&rec.id===from)e.to='Cannot transfer to the same account.';else if(rec&&rec.status!=='active')e.to='Recipient account is not active.';
   if(!amt||isNaN(n)||n<=0)e.amt='Enter an amount greater than zero.';else if(!/^\d+(\.\d{1,2})?$/.test(amt))e.amt='Use at most 2 decimal places.';else if(f&&n>f.balance)e.amt='Insufficient balance. Available: '+fmt(f.balance);else if(f&&f.status!=='active')e.from='Sender account is not active.';
   setErr(e);if(!Object.keys(e).length)setConfirm(true)};
  const run=async()=>{setBusy(true);try{const t=await svc.transfer(user,from,to,n,note.trim());setRes({ok:true,t});setAmt('');setNote('');setTo('');toast('Transfer successful')}catch(e){setRes({ok:false,msg:e.message});toast(e.message,'err')}setBusy(false);setConfirm(false)};
  const others=accts.filter(a=>a.id!==from);
- return <><Title t="Money Transfer" sub="Move money between FinCore accounts (simulated)"/>
+ return <><Title t="Money Transfer" sub={USE_BACKEND?"Move money between FinCore accounts":"Move money between FinCore accounts (simulated)"}/>
   <Card className="max-w-lg"><div className="space-y-3">
    <Field label="From account" error={err.from}><select className={inp} value={from} onChange={e=>setFrom(e.target.value)}>{accts.map(x=><option key={x.id} value={x.id}>{x.nick} ••{x.no.slice(-4)} — {fmt(x.balance)}</option>)}</select></Field>
    <Field label="Recipient account number" error={err.to}><input className={inp} placeholder="e.g. FCN2002345601" value={to} onChange={e=>setTo(e.target.value)}/></Field>
-   {others.length>0&&<div className="flex flex-wrap gap-2 text-xs">{others.map(o=><button key={o.id} className="rounded-full border border-slate-300 px-2 py-1 dark:border-slate-600" onClick={()=>setTo(o.no)}>My {o.nick}</button>)}<button className="rounded-full border border-slate-300 px-2 py-1 dark:border-slate-600" onClick={()=>setTo('FCN2002345601')}>Demo: Arjun Mehta</button></div>}
+   {others.length>0&&<div className="flex flex-wrap gap-2 text-xs">{others.map(o=><button key={o.id} className="rounded-full border border-slate-300 px-2 py-1 dark:border-slate-600" onClick={()=>setTo(o.no)}>My {o.nick}</button>)}{!USE_BACKEND&&<button className="rounded-full border border-slate-300 px-2 py-1 dark:border-slate-600" onClick={()=>setTo('FCN2002345601')}>Demo: Arjun Mehta</button>}</div>}
    {rec&&recUser&&<p className="text-xs text-emerald-600">Recipient: {recUser.name} ({rec.type})</p>}
    <Field label="Amount (₹)" error={err.amt}><input className={inp} inputMode="decimal" placeholder="0.00" value={amt} onChange={e=>setAmt(e.target.value)}/></Field>
    <Field label="Note (optional)"><input className={inp} maxLength={60} value={note} onChange={e=>setNote(e.target.value)}/></Field>
    <Btn className="w-full" onClick={check}>Review transfer</Btn></div></Card>
-  {confirm&&<Modal title="Confirm transfer" onClose={()=>!busy&&setConfirm(false)}><dl className="space-y-1 text-sm"><div>From: <b>{f.nick} ••{f.no.slice(-4)}</b></div><div>To: <b>{recUser.name} ••{rec.no.slice(-4)}</b></div><div>Amount: <b>{fmt(n)}</b></div></dl><p className="mt-2 text-xs text-amber-600">Simulation only — no real money moves.</p><div className="mt-4 flex gap-2"><Btn v="out" className="flex-1" disabled={busy} onClick={()=>setConfirm(false)}>Cancel</Btn><Btn busy={busy} className="flex-1" onClick={run}>Confirm</Btn></div></Modal>}
-    {res&&(res.ok?<TxDetail t={res.t} title="✓ Transfer receipt" onClose={()=>setRes(null)}/>:<Modal title="Transfer failed" onClose={()=>setRes(null)}><p className="text-sm text-red-600">{res.msg}</p><Btn className="mt-4 w-full" onClick={()=>setRes(null)}>Close</Btn></Modal>)}</>}
+  {confirm&&<Modal title="Confirm transfer" onClose={()=>!busy&&setConfirm(false)}><dl className="space-y-1 text-sm"><div>From: <b>{f.nick} ••{f.no.slice(-4)}</b></div><div>To: <b>{rec&&recUser?recUser.name+' ••'+rec.no.slice(-4):to.trim().toUpperCase()}</b></div><div>Amount: <b>{fmt(n)}</b></div></dl>{!USE_BACKEND&&<p className="mt-2 text-xs text-amber-600">Simulation only — no real money moves.</p>}<div className="mt-4 flex gap-2"><Btn v="out" className="flex-1" disabled={busy} onClick={()=>setConfirm(false)}>Cancel</Btn><Btn busy={busy} className="flex-1" onClick={run}>Confirm</Btn></div></Modal>}
+      {res&&(res.ok?<TxDetail t={res.t} title="✓ Transfer receipt" onClose={()=>setRes(null)}/>:<Modal title="Transfer failed" onClose={()=>setRes(null)}><p className="text-sm text-red-600">{res.msg}</p><Btn className="mt-4 w-full" onClick={()=>setRes(null)}>Close</Btn></Modal>)}</>}
 
 /* ---------- History ---------- */
 function Filters({q,setQ,from,setFrom,to,setTo,st,setSt,ty,setTy}){return <div className="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-5"><div className="relative lg:col-span-1"><span className="absolute left-2.5 top-2.5 text-slate-400"><Ic n="search"/></span><input className={inp+' pl-8'} placeholder="Search…" value={q} onChange={e=>setQ(e.target.value)}/></div><input type="date" className={inp} value={from} onChange={e=>setFrom(e.target.value)} aria-label="From date"/><input type="date" className={inp} value={to} onChange={e=>setTo(e.target.value)} aria-label="To date"/><select className={inp} value={st} onChange={e=>setSt(e.target.value)}><option value="">All statuses</option><option>completed</option><option>failed</option><option>pending</option></select><select className={inp} value={ty} onChange={e=>setTy(e.target.value)}><option value="">All types</option><option value="deposit">Deposit</option><option value="withdrawal">Withdrawal</option><option value="transfer">Transfer</option></select></div>}
