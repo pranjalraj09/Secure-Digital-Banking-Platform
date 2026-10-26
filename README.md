@@ -45,25 +45,24 @@ require additional development.
 
 ## 2. Technology Stack
 
-  Component                     Technology
-  ----------------------------- --------------------------------
-  Frontend                      HTML, React, JavaScript
-  Frontend development server   Vite
-  Styling                       Tailwind CSS
-  Backend                       Java 23, Spring Boot 3.3.5
-  REST API                      Spring Web
-  Database                      PostgreSQL
-  ORM                           Spring Data JPA / Hibernate
-  Database migrations           Flyway
-  Authentication                JWT
-  API documentation             Springdoc OpenAPI / Swagger UI
-  Build tool                    Maven
-  Optional caching              Redis
-  Optional messaging            Apache Kafka
+| Component                   | Technology                     |
+| :-------------------------- | :----------------------------- |
+| Frontend                    | HTML, React, JavaScript        |
+| Frontend Development Server | Vite                           |
+| Styling                     | Tailwind CSS                   |
+| Backend                     | Java 23, Spring Boot 3.3.5     |
+| REST API                    | Spring Web                     |
+| Database                    | PostgreSQL                     |
+| ORM                         | Spring Data JPA / Hibernate    |
+| Database Migrations         | Flyway                         |
+| Authentication              | JWT                            |
+| API Documentation           | Springdoc OpenAPI / Swagger UI |
+| Build Tool                  | Maven                          |
+| Optional Caching            | Redis                          |
+| Optional Messaging          | Apache Kafka                   |
 
-The frontend loads React, Recharts, Babel, and Tailwind CSS from
-external CDNs, so an internet connection is required to load the
-complete interface.
+The frontend loads React, Recharts, Babel, and Tailwind CSS from external CDNs, so an internet connection is required to load the complete interface.
+
 
 ## 3. Project Structure
 
