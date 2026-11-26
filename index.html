@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>FINCORE Nexus</title>
+<html lang="en"><head><meta charset="utf-8"><title>FINCORE Nexus | Digital Banking</title>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <script src="https://cdn.tailwindcss.com/3.4.17"></script>
 <script>tailwind.config={darkMode:'class',theme:{extend:{colors:{navy:{950:'#071428',900:'#0b1f3a',800:'#10294d',700:'#17356a',600:'#1e4388',500:'#2d5fb8'}}}}}</script>
@@ -8,6 +8,7 @@
 <script src="https://cdn.jsdelivr.net/npm/prop-types@15.8.1/prop-types.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/react-is@18.3.1/umd/react-is.production.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/recharts@2.12.7/umd/Recharts.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.25.6/babel.min.js"></script>
 <style>:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;background:#f1f5fa}.dark body{background:#071428}</style>
 </head><body class="text-slate-800 dark:text-slate-100"><div id="root"></div>
@@ -57,10 +58,10 @@ const seed=()=>{
  T(5,'withdrawal',90000,'ATM withdrawal (declined)','a-2',null,'failed');
  txns.sort((a,b)=>b.date.localeCompare(a.date));
  const audit=[{id:uid('AUD'),date:dAgo(2),actor:'Admin Officer',action:'ACCOUNT_REVIEW',detail:'Routine review of dormant accounts'},{id:uid('AUD'),date:dAgo(1),actor:'Priya Sharma',action:'LOGIN',detail:'Customer sign-in'}];
- return {users,accounts,txns,audit};};
+ return {users,accounts,txns,audit,loans:[],kyc:{}};};
 
 /* ---------- BACKEND CONNECTION (added) — start ---------- */
-const USE_BACKEND=true;                 // set to false to go back to the original fake demo (no backend needed)
+const USE_BACKEND=false;                // frontend-only milestone work; backend integration will be added by the backend developer
 const API_URL='http://localhost:8080';
 let TOKEN=null,ROLE=null;
 const isUuid=s=>/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(s));
@@ -93,13 +94,11 @@ async function asStaff(fn){const k=[TOKEN,ROLE];await getToken('teller@fincore.b
 const toAcct=(r,userId,old)=>({id:r.id,no:r.accountNumber,userId,type:r.accountType==='CHECKING'?'Current':'Savings',
  nick:(old&&old.nick)||(r.accountType==='CHECKING'?'Current Account':'Savings Account'),
  balance:Number(r.balance),status:String(r.status||'ACTIVE').toLowerCase(),opened:r.createdAt});
-const toTxn=r=>{const ty=String(r.transactionType).toUpperCase();const tr=ty==='TRANSFER';
- const out=tr?!/-CREDIT$/.test(String(r.referenceId||'')):ty==='WITHDRAWAL';   // does money leave this account?
- const st=String(r.status).toUpperCase();
+const toTxn=r=>{const w=String(r.transactionType).toUpperCase()==='WITHDRAWAL';const st=String(r.status).toUpperCase();
  const status=st==='COMPLETED'?'completed':(st==='FAILED'||st==='REJECTED')?'failed':'pending';
- return {id:r.id,date:r.timestamp,type:tr?'transfer':out?'withdrawal':'deposit',amount:Number(r.amount),
-  desc:(r.description||(tr?'Fund Transfer':out?'Cash withdrawal':'Cash deposit'))+(status==='failed'&&r.failureReason?' — '+r.failureReason:''),
-  from:out?r.accountId:null,to:out?null:r.accountId,status,note:''}};
+ return {id:r.id,date:r.timestamp,type:w?'withdrawal':'deposit',amount:Number(r.amount),
+  desc:(r.description||(w?'Cash withdrawal':'Cash deposit'))+(status==='failed'&&r.failureReason?' — '+r.failureReason:''),
+  from:w?r.accountId:null,to:w?null:r.accountId,status,note:''}};
 function upsertAcct(db,a){const i=db.accounts.findIndex(x=>x.id===a.id);if(i>=0)db.accounts[i]=a;else db.accounts.push(a)}
 function setTxns(db,accId,list){db.txns=db.txns.filter(t=>t.from!==accId&&t.to!==accId).concat(list);db.txns.sort((a,b)=>String(b.date).localeCompare(String(a.date)))}
 // remove the original made-up accounts/transactions (their ids are not real backend ids)
@@ -155,16 +154,7 @@ function makeBackendSvc({db,commit,fake}){
    const a=toAcct(r,u.id,{nick:nick||type+' Account'});upsertAcct(db,a);commit();return a},
   deposit:(u,id,amt,note)=>money(u,id,amt,note,'deposit'),
   withdraw:(u,id,amt,note)=>money(u,id,amt,note,'withdraw'),
-  async transfer(u,fromId,toNo,amt,note){
-   const a=db.accounts.find(x=>x.id===fromId);if(!a)throw Error('Sender account not found.');
-   const r=await api('/api/accounts/'+fromId+'/transactions/transfer','POST',{targetAccountNumber:String(toNo).trim().toUpperCase(),amount:amt,description:note||'Fund Transfer',referenceId:'WEB-'+Date.now()+'-'+Math.random().toString(36).slice(2,6)});
-   a.balance=Number(r.sourceResultingBalance);
-   const own=db.accounts.find(x=>x.id===r.targetAccountId);          // recipient is also one of this user's own accounts
-   if(own)own.balance=Number(r.targetResultingBalance);
-   const debit={id:r.id,date:r.timestamp,type:'transfer',amount:Number(r.amount),desc:r.description||'Fund Transfer',from:fromId,to:null,status:'completed',note};
-   if(own)db.txns.unshift({...debit,id:r.id+'-credit',desc:(note||'Fund Transfer')+' <- '+a.no,from:null,to:own.id});
-   db.txns.unshift(debit);commit();
-   return {...debit,to:r.targetAccountId}},                           // receipt shows both sides
+  async transfer(){throw Error('Transfer is not available yet: the backend transfer API is still being built.')},
   async setStatus(admin,kind,id,status){
    if(kind==='account'&&isUuid(id)){
     await api('/api/accounts/'+id+'/status','PATCH',{status:status==='frozen'?'FROZEN':'ACTIVE',reason:'Changed from admin console'});
@@ -174,14 +164,16 @@ function makeBackendSvc({db,commit,fake}){
  }}
 /* ---------- BACKEND CONNECTION (added) — end ---------- */
 
+function buildEmiSchedule(loan){const principal=Number(loan.amount)||0,rate=(Number(loan.rate)||0)/1200,months=Number(loan.tenure)||0,emi=emiFor(principal,Number(loan.rate)||0,months);let balance=principal;const start=new Date(loan.disbursedAt||loan.createdAt||Date.now());return Array.from({length:months},(_,i)=>{const interest=balance*rate;let principalPart=Math.min(balance,emi-interest);if(i===months-1)principalPart=balance;const total=principalPart+interest;balance=Math.max(0,balance-principalPart);const due=new Date(start.getFullYear(),start.getMonth()+i+1,start.getDate());return {number:i+1,dueDate:due.toISOString(),openingBalance:balance+principalPart,principal:principalPart,interest,emi:total,closingBalance:balance}})}
 const Ctx=createContext();const useApp=()=>useContext(Ctx);
+
 /* ---------- UI primitives ---------- */
 const Btn=({v='pri',className,busy,children,...p})=><button {...p} disabled={p.disabled||busy} className={cx('inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed',v==='pri'&&'bg-navy-700 text-white hover:bg-navy-600 dark:bg-navy-500 dark:hover:bg-navy-600',v==='out'&&'border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800',v==='dng'&&'bg-red-600 text-white hover:bg-red-700',v==='gho'&&'hover:bg-slate-100 dark:hover:bg-slate-800',className)}>{busy&&<span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"/>}{children}</button>;
 const Card=({className,children})=><div className={cx('rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700/60 dark:bg-navy-900',className)}>{children}</div>;
 const inp='w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-navy-500 dark:border-slate-600 dark:bg-navy-950';
 const Field=({label,error,children})=><label className="block text-sm"><span className="mb-1 block font-medium text-slate-600 dark:text-slate-300">{label}</span>{children}{error&&<span className="mt-1 block text-xs text-red-600 dark:text-red-400">{error}</span>}</label>;
 const Badge=({s})=>{const m={active:'green',completed:'green',failed:'red',frozen:'amber',suspended:'red',pending:'amber'}[s]||'slate';const c={green:'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300',red:'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300',amber:'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300',slate:'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200'}[m];return <span className={cx('rounded-full px-2 py-0.5 text-xs font-medium capitalize',c)}>{s}</span>};
-const Modal=({title,onClose,children})=><div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}><div className="max-h-[90vh] w-full max-w-md overflow-auto rounded-xl bg-white p-6 shadow-xl dark:bg-navy-900" onClick={e=>e.stopPropagation()}><div className="mb-4 flex items-center justify-between"><h3 className="text-lg font-semibold">{title}</h3><button onClick={onClose} aria-label="Close"><Ic n="x"/></button></div>{children}</div></div>;
+const Modal=({title,onClose,children,wide})=><div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}><div className={cx("max-h-[90vh] w-full overflow-auto rounded-xl bg-white p-6 shadow-xl dark:bg-navy-900",wide?"max-w-4xl":"max-w-md")} onClick={e=>e.stopPropagation()}><div className="mb-4 flex items-center justify-between"><h3 className="text-lg font-semibold">{title}</h3><button onClick={onClose} aria-label="Close"><Ic n="x"/></button></div>{children}</div></div>;
 const Title=({t,sub,children})=><div className="mb-5 flex flex-wrap items-end justify-between gap-3"><div><h1 className="text-2xl font-semibold text-navy-800 dark:text-white">{t}</h1>{sub&&<p className="text-sm text-slate-500 dark:text-slate-400">{sub}</p>}</div>{children}</div>;
 const Table=({cols,rows,onRow,empty='No records found.'})=><div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead><tr className="border-b border-slate-200 text-xs uppercase text-slate-500 dark:border-slate-700">{cols.map(c=><th key={c} className="whitespace-nowrap px-3 py-2 font-medium">{c}</th>)}</tr></thead><tbody>{rows.length?rows.map((r,i)=><tr key={i} onClick={onRow?()=>onRow(i):undefined} className={cx('border-b border-slate-100 dark:border-slate-800',onRow&&'cursor-pointer hover:bg-slate-50 dark:hover:bg-navy-800')}>{r.map((c,j)=><td key={j} className="whitespace-nowrap px-3 py-2.5">{c}</td>)}</tr>):<tr><td colSpan={cols.length} className="px-3 py-8 text-center text-slate-500">{empty}</td></tr>}</tbody></table></div>;
 
@@ -189,7 +181,7 @@ const Table=({cols,rows,onRow,empty='No records found.'})=><div className="overf
 const signed=(t,ids)=>(ids.has(t.to)?t.amount:0)-(ids.has(t.from)?t.amount:0);
 const acctName=(db,id)=>{const a=db.accounts.find(x=>x.id===id);return a?`${a.nick||a.type} ••${a.no.slice(-4)}`:'External'};
 const typeLabel={deposit:'Deposit',withdrawal:'Withdrawal',transfer:'Transfer'};
-const SimBanner=()=><div className="bg-amber-400 px-3 py-1.5 text-center text-xs font-semibold text-navy-950">{USE_BACKEND?'LIVE BACKEND · DEV MODE · test data only':'SIMULATION ONLY'}</div>;
+const SimBanner=()=><div className="bg-amber-400 px-3 py-1.5 text-center text-xs font-semibold text-navy-950">SIMULATION ONLY</div>;
 
 /* ---------- App ---------- */
 function App(){
@@ -208,7 +200,14 @@ function App(){
   async withdraw(u,id,amt,note){await delay(900);const a=db.accounts.find(x=>x.id===id);if(!a||a.userId!==u.id)throw Error('Account not found.');if(a.status!=='active')throw Error('Account is not active.');if(!(amt>0))throw Error('Amount must be positive.');if(amt>a.balance)throw Error('Insufficient balance for this withdrawal.');a.balance=+(a.balance-amt).toFixed(2);const t={id:uid('TXN'),date:new Date().toISOString(),type:'withdrawal',amount:amt,desc:note||'Cash withdrawal (simulated)',from:id,to:null,status:'completed',note};db.txns.unshift(t);log(u,'WITHDRAW',`${fmt(amt)} ← ${a.no}`);commit();return t},
   async transfer(u,fromId,toNo,amt,note){await delay(1000);const f=db.accounts.find(x=>x.id===fromId);const t=db.accounts.find(x=>x.no===toNo.trim().toUpperCase());if(!f||f.userId!==u.id)throw Error('Sender account not found.');if(!t)throw Error('Recipient account number not found.');if(t.id===f.id)throw Error('Cannot transfer to the same account.');if(f.status!=='active'||t.status!=='active')throw Error('Both accounts must be active.');if(!(amt>0))throw Error('Amount must be positive.');if(amt>f.balance)throw Error('Insufficient balance for this transfer.');f.balance=+(f.balance-amt).toFixed(2);t.balance=+(t.balance+amt).toFixed(2);const x={id:uid('TXN'),date:new Date().toISOString(),type:'transfer',amount:amt,desc:note||'Transfer',from:f.id,to:t.id,status:'completed',note};db.txns.unshift(x);log(u,'TRANSFER',`${fmt(amt)} ${f.no} → ${t.no}`);commit();return x},
   async updateProfile(u,f){await delay(600);Object.assign(db.users.find(x=>x.id===u.id),f);log(u,'PROFILE_UPDATE','Profile edited');commit()},
-  async setStatus(admin,kind,id,status){await delay(400);const o=(kind==='user'?db.users:db.accounts).find(x=>x.id===id);o.status=status;log(admin,kind.toUpperCase()+'_'+status.toUpperCase(),o.name||o.no);commit()}};
+  async setStatus(admin,kind,id,status){await delay(400);const o=(kind==='user'?db.users:db.accounts).find(x=>x.id===id);o.status=status;log(admin,kind.toUpperCase()+'_'+status.toUpperCase(),o.name||o.no);commit()},
+  async applyLoan(u,form){await delay(500);const loan={id:uid('LOAN'),userId:u.id,customerName:u.name,type:form.type,amount:Number(form.amount),tenure:Number(form.tenure),income:Number(form.income),purpose:form.purpose,rate:form.type==='Personal'?12.5:form.type==='Education'?8.5:form.type==='Home'?8.25:10.5,status:'pending',disbursementStatus:'not_disbursed',paidInstallments:[],payments:[],createdAt:new Date().toISOString()};db.loans.unshift(loan);log(u,'LOAN_APPLICATION',loan.type+' loan application '+loan.id);commit();return loan},
+  async reviewLoan(admin,id,status,note){await delay(350);const loan=db.loans.find(x=>x.id===id);if(!loan)throw Error('Loan application not found.');loan.status=status;loan.reviewNote=note||'';loan.reviewedAt=new Date().toISOString();if(status==='approved')loan.disbursementStatus='awaiting_disbursement';log(admin,'LOAN_'+status.toUpperCase(),loan.id+' · '+loan.type);commit();return loan},
+  async disburseLoan(admin,id){const loan=db.loans.find(x=>x.id===id);if(!loan||loan.status!=='approved')throw Error('Only approved loans can be disbursed.');if(loan.disbursementStatus==='disbursed')throw Error('Loan already disbursed.');loan.disbursementStatus='disbursed';loan.disbursedAt=new Date().toISOString();loan.outstandingPrincipal=loan.amount;log(admin,'LOAN_DISBURSED',loan.id+' · '+fmt(loan.amount));commit();return loan},
+  async payLoanEmi(u,id){const loan=db.loans.find(x=>x.id===id&&x.userId===u.id);if(!loan||loan.disbursementStatus!=='disbursed')throw Error('Loan is not available for repayment.');const schedule=buildEmiSchedule(loan);const next=schedule.find(x=>!loan.paidInstallments.includes(x.number));if(!next)throw Error('All EMIs are already paid.');loan.paidInstallments.push(next.number);loan.payments=loan.payments||[];loan.payments.push({number:next.number,amount:next.emi,paidAt:new Date().toISOString(),reference:uid('EMI')});loan.outstandingPrincipal=Math.max(0,next.closingBalance);log(u,'LOAN_EMI_PAID',loan.id+' · installment '+next.number);commit();return next},
+  async saveKyc(u,files){const previous=db.kyc[u.id]||{};db.kyc[u.id]={...previous,...files,applicationId:previous.applicationId||uid('KYC'),status:files.panFile&&files.addressFile&&files.otpVerified==='yes'?'submitted':(previous.status||'draft'),reviewNote:'',updatedAt:new Date().toISOString()};log(u,'KYC_DOCUMENTS_UPDATED','KYC documents submitted (demo)');commit()},
+  async viewKycDoc(admin,userId,label,name){log(admin,'KYC_DOCUMENT_VIEWED',label+' · '+name+' · '+userId);commit()},
+  async reviewKyc(admin,userId,status,note){const k=db.kyc[userId];if(!k)throw Error('KYC application not found.');k.status=status;k.reviewNote=note||'';k.reviewedAt=new Date().toISOString();log(admin,'KYC_'+status.toUpperCase(),userId);commit();return k}};
  const svc=USE_BACKEND?{...fake,...makeBackendSvc({db,commit,fake})}:fake;
  const go=p=>setPage(p);
  const signIn=u=>{setUser(u);setPage(u.role==='admin'?'a-overview':'dashboard')};
@@ -246,17 +245,17 @@ function Auth({onAuth}){
   </div></div>}
 
 /* ---------- Shell ---------- */
-const CUST=[['dashboard','Dashboard','home'],['accounts','My Accounts','wallet'],['money','Deposit / Withdraw','down'],['transfer','Transfer','swap'],['history','Transactions','list'],['statements','Statements','file'],['profile','Profile','user']];
-const ADM=[['a-overview','Overview','grid'],['a-customers','Customers','users'],['a-accounts','Accounts','wallet'],['a-txns','Transactions','list'],['a-audit','Audit Logs','act']];
+const CUST=[['dashboard','Dashboard','home'],['accounts','My Accounts','wallet'],['money','Deposit / Withdraw','down'],['transfer','Transfer','swap'],['payments','Payments & Transfers','swap'],['history','Transactions','list'],['statements','Statements','file'],['loans','Loans & EMI','bank'],['kyc','KYC Verification','file'],['profile','Profile','user']];
+const ADM=[['a-overview','Overview','grid'],['a-customers','Customers','users'],['a-accounts','Accounts','wallet'],['a-txns','Transactions','list'],['a-payments','Payment Operations','swap'],['a-loans','Loan Applications','file'],['a-kyc','KYC Verification','file'],['a-audit','Audit Logs','act']];
 function Shell({dark,setDark,onLogout}){
  const {user,page,go}=useApp();const [open,setOpen]=useState(false);const nav=user.role==='admin'?ADM:CUST;
- const Page={dashboard:Dashboard,accounts:Accounts,money:Money,transfer:Transfer,history:History,statements:Statements,profile:Profile,'a-overview':AOverview,'a-customers':ACustomers,'a-accounts':AAccounts,'a-txns':ATxns,'a-audit':AAudit}[page]||Dashboard;
+ const Page={dashboard:Dashboard,accounts:Accounts,money:Money,transfer:Transfer,payments:CustomerPayments,history:History,statements:Statements,loans:Loans,kyc:KYC,profile:Profile,'a-overview':AOverview,'a-customers':ACustomers,'a-accounts':AAccounts,'a-txns':ATxns,'a-payments':AdminPayments,'a-loans':ALoans,'a-kyc':AKYC,'a-audit':AAudit}[page]||Dashboard;
  return <div className="flex min-h-[calc(100vh-30px)]">
   {open&&<div className="fixed inset-0 z-30 bg-black/40 lg:hidden" onClick={()=>setOpen(false)}/>}
   <aside className={cx('fixed z-40 flex h-full w-64 flex-col bg-navy-900 text-slate-200 transition-transform lg:static lg:translate-x-0',open?'translate-x-0':'-translate-x-full')}>
    <div className="flex items-center gap-2 p-5 text-lg font-bold text-white"><Ic n="bank" c="w-6 h-6"/>FinCore Nexus</div>
    {user.role==='admin'&&<div className="mx-4 mb-2 rounded bg-navy-600 px-2 py-1 text-xs">ADMIN CONSOLE</div>}
-      <nav className="flex-1 space-y-1 px-3">{nav.map(([k,l,i])=><button key={k} onClick={()=>{go(k);setOpen(false)}} className={cx('flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm',page===k?'bg-navy-600 text-white':'hover:bg-navy-800')}><Ic n={i}/>{l}</button>)}</nav>
+   <nav className="flex-1 space-y-1 px-3">{nav.map(([k,l,i])=><button key={k} onClick={()=>{go(k);setOpen(false)}} className={cx('flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm',page===k?'bg-navy-600 text-white':'hover:bg-navy-800')}><Ic n={i}/>{l}</button>)}</nav>
    <button onClick={onLogout} className="m-3 flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm hover:bg-navy-800"><Ic n="out"/>Sign out</button>
   </aside>
   <div className="min-w-0 flex-1">
@@ -279,7 +278,7 @@ function Dashboard(){
  const months=[...Array(6)].map((_,i)=>{const d=new Date(now.getFullYear(),now.getMonth()-5+i,1);return {k:d.getFullYear()+'-'+d.getMonth(),m:d.toLocaleString('en',{month:'short'}),Income:0,Expenses:0}});
  ok.forEach(t=>{const r=months.find(m=>m.k===key(t.date));if(!r)return;const s=signed(t,ids);if(s>0)r.Income+=s;else r.Expenses-=s});
  const cur=months[5];
- return <><Title t={`Hello, ${user.name.split(' ')[0]}`} sub="Here's your financial overview (simulated data)"/>
+ return <><Title t={`Hello, ${user.name.split(' ')[0]}`} sub="Here's your financial overview"/>
   <div className="grid gap-4 sm:grid-cols-3">
    <Card className="bg-gradient-to-br from-navy-700 to-navy-900 text-white sm:col-span-1"><div className="text-sm text-blue-200">Total balance</div><div className="mt-1 text-3xl font-bold">{fmt(total)}</div><div className="mt-2 text-xs text-blue-200">{accts.length} account(s)</div></Card>
    <Card><div className="text-sm text-slate-500">Income this month</div><div className="mt-1 text-2xl font-semibold text-emerald-600">{fmt(cur.Income)}</div></Card>
@@ -292,13 +291,13 @@ function Dashboard(){
 
 function TxDetail({t,onClose,title='Transaction details'}){
  const {db}=useApp();const rows=[['Reference',t.id],['Type',typeLabel[t.type]],['Amount',fmt(t.amount)],['Status',<Badge s={t.status}/>],['Date',dt(t.date)],['From',t.from?acctName(db,t.from):'—'],['To',t.to?acctName(db,t.to):'—'],['Description',t.desc]];
- return <Modal title={title} onClose={onClose}><dl className="space-y-2 text-sm">{rows.map(([k,v])=><div key={k} className="flex justify-between gap-4 border-b border-slate-100 pb-2 dark:border-slate-800"><dt className="text-slate-500">{k}</dt><dd className="text-right font-medium">{v}</dd></div>)}</dl><p className="mt-3 text-xs text-amber-600">Simulated transaction — not a real banking transaction.</p><Btn className="mt-4 w-full" onClick={onClose}>Close</Btn></Modal>}
+ return <Modal title={title} onClose={onClose}><dl className="space-y-2 text-sm">{rows.map(([k,v])=><div key={k} className="flex justify-between gap-4 border-b border-slate-100 pb-2 dark:border-slate-800"><dt className="text-slate-500">{k}</dt><dd className="text-right font-medium">{v}</dd></div>)}</dl><Btn className="mt-4 w-full" onClick={onClose}>Close</Btn></Modal>}
 
 /* ---------- Accounts ---------- */
 function Accounts(){
  const {user,svc,toast,db}=useApp();const {accts,ids}=useMine();const [show,setShow]=useState(false);const [det,setDet]=useState(null);const [type,setType]=useState('Savings');const [nick,setNick]=useState('');const [busy,setBusy]=useState(false);
  const create=async()=>{setBusy(true);try{const a=await svc.openAccount(user,type,nick.trim());toast('Account created: '+a.no);setShow(false);setNick('')}catch(e){toast(e.message,'err')}setBusy(false)};
- return <><Title t="My Accounts" sub="Simulated accounts"><Btn onClick={()=>setShow(true)}><Ic n="plus"/>New account</Btn></Title>
+ return <><Title t="My Accounts" sub="Manage your accounts"><Btn onClick={()=>setShow(true)}><Ic n="plus"/>New account</Btn></Title>
   <div className="grid gap-4 md:grid-cols-2">{accts.map(a=><Card key={a.id}><div className="flex justify-between"><div><div className="font-semibold">{a.nick}</div><div className="text-xs text-slate-500">{a.type} · {a.no}</div></div><Badge s={a.status}/></div><div className="mt-4 text-2xl font-bold text-navy-700 dark:text-blue-300">{fmt(a.balance)}</div><Btn v="out" className="mt-4" onClick={()=>setDet(a)}>View details</Btn></Card>)}</div>
   {show&&<Modal title="Open new account" onClose={()=>setShow(false)}><div className="space-y-3"><Field label="Account type"><select className={inp} value={type} onChange={e=>setType(e.target.value)}><option>Savings</option><option>Current</option></select></Field><Field label="Nickname (optional)"><input className={inp} maxLength={30} value={nick} onChange={e=>setNick(e.target.value)}/></Field><Btn busy={busy} className="w-full" onClick={create}>Create account</Btn></div></Modal>}
   {det&&<Modal title="Account details" onClose={()=>setDet(null)}><dl className="space-y-2 text-sm">{[['Name',det.nick],['Account no.',det.no],['Type',det.type],['Balance',fmt(det.balance)],['Status',<Badge s={det.status}/>],['Opened',dt(det.opened)],['Transactions',db.txns.filter(t=>t.from===det.id||t.to===det.id).length]].map(([k,v])=><div key={k} className="flex justify-between border-b border-slate-100 pb-2 dark:border-slate-800"><dt className="text-slate-500">{k}</dt><dd className="font-medium">{v}</dd></div>)}</dl></Modal>}</>}
@@ -310,13 +309,13 @@ function Money(){
  const a=accts.find(x=>x.id===acct);const n=parseFloat(amt);
  const check=()=>{let e='';if(!a)e='Select an account.';else if(a.status!=='active')e='This account is not active.';else if(!amt||isNaN(n)||n<=0)e='Enter an amount greater than zero.';else if(!/^\d+(\.\d{1,2})?$/.test(amt))e='Use at most 2 decimal places.';else if(mode==='deposit'&&n>500000)e='Demo deposit limit is ₹5,00,000.';else if(mode==='withdraw'&&n>a.balance)e='Insufficient balance. Available: '+fmt(a.balance);setErr(e);if(!e)setConfirm(true)};
  const run=async()=>{setBusy(true);try{const t=await svc[mode](user,acct,n,note.trim());setRes({ok:true,t});setAmt('');setNote('');toast(mode==='deposit'?'Deposit successful':'Withdrawal successful')}catch(e){setRes({ok:false,msg:e.message});toast(e.message,'err')}setBusy(false);setConfirm(false)};
- return <><Title t="Deposit & Withdraw" sub="Simulated cash operations"/>
+ return <><Title t="Deposit & Withdraw" sub="Manage deposits and withdrawals"/>
   <Card className="max-w-lg"><div className="mb-4 grid grid-cols-2 rounded-lg bg-slate-100 p-1 text-sm dark:bg-navy-950">{[['deposit','Deposit'],['withdraw','Withdraw']].map(([k,l])=><button key={k} onClick={()=>{setMode(k);setErr('')}} className={cx('rounded-md py-1.5',mode===k&&'bg-white font-medium shadow dark:bg-navy-700')}>{l}</button>)}</div>
    <div className="space-y-3"><Field label="Account"><select className={inp} value={acct} onChange={e=>setAcct(e.target.value)}>{accts.map(x=><option key={x.id} value={x.id}>{x.nick} ••{x.no.slice(-4)} — {fmt(x.balance)}</option>)}</select></Field>
     <Field label="Amount (₹)" error={err}><input className={inp} inputMode="decimal" placeholder="0.00" value={amt} onChange={e=>setAmt(e.target.value)}/></Field>
     <Field label="Note (optional)"><input className={inp} maxLength={60} value={note} onChange={e=>setNote(e.target.value)}/></Field>
     <Btn className="w-full" onClick={check}>Continue</Btn></div></Card>
-  {confirm&&<Modal title={`Confirm ${mode}`} onClose={()=>!busy&&setConfirm(false)}><p className="text-sm">{mode==='deposit'?'Deposit':'Withdraw'} <b>{fmt(n)}</b> {mode==='deposit'?'into':'from'} <b>{a.nick} ••{a.no.slice(-4)}</b>?</p><p className="mt-1 text-xs text-amber-600">Simulation only.</p><div className="mt-4 flex gap-2"><Btn v="out" className="flex-1" disabled={busy} onClick={()=>setConfirm(false)}>Cancel</Btn><Btn busy={busy} className="flex-1" onClick={run}>Confirm</Btn></div></Modal>}
+  {confirm&&<Modal title={`Confirm ${mode}`} onClose={()=>!busy&&setConfirm(false)}><p className="text-sm">{mode==='deposit'?'Deposit':'Withdraw'} <b>{fmt(n)}</b> {mode==='deposit'?'into':'from'} <b>{a.nick} ••{a.no.slice(-4)}</b>?</p><div className="mt-4 flex gap-2"><Btn v="out" className="flex-1" disabled={busy} onClick={()=>setConfirm(false)}>Cancel</Btn><Btn busy={busy} className="flex-1" onClick={run}>Confirm</Btn></div></Modal>}
   {res&&(res.ok?<TxDetail t={res.t} title="✓ Transaction successful" onClose={()=>setRes(null)}/>:<Modal title="Transaction failed" onClose={()=>setRes(null)}><p className="text-sm text-red-600">{res.msg}</p><Btn className="mt-4 w-full" onClick={()=>setRes(null)}>Close</Btn></Modal>)}</>}
 
 /* ---------- Transfer ---------- */
@@ -324,22 +323,22 @@ function Transfer(){
  const {user,svc,toast,db}=useApp();const {accts}=useMine();const [from,setFrom]=useState(accts[0]?.id||'');const [to,setTo]=useState('');const [amt,setAmt]=useState('');const [note,setNote]=useState('');const [err,setErr]=useState({});
  const [confirm,setConfirm]=useState(false);const [busy,setBusy]=useState(false);const [res,setRes]=useState(null);
  const f=accts.find(a=>a.id===from);const rec=db.accounts.find(a=>a.no===to.trim().toUpperCase());const recUser=rec&&db.users.find(u=>u.id===rec.userId);const n=parseFloat(amt);
- const check=()=>{const e={};if(!f)e.from='Select a sender account.';if(!to.trim())e.to='Enter or pick a recipient account number.';else if(!rec&&!USE_BACKEND)e.to='No FinCore account found with that number.';else if(rec&&rec.id===from)e.to='Cannot transfer to the same account.';else if(rec&&rec.status!=='active')e.to='Recipient account is not active.';
+ const check=()=>{const e={};if(!f)e.from='Select a sender account.';if(!to.trim())e.to='Enter or pick a recipient account number.';else if(!rec)e.to='No FinCore account found with that number.';else if(rec.id===from)e.to='Cannot transfer to the same account.';else if(rec.status!=='active')e.to='Recipient account is not active.';
   if(!amt||isNaN(n)||n<=0)e.amt='Enter an amount greater than zero.';else if(!/^\d+(\.\d{1,2})?$/.test(amt))e.amt='Use at most 2 decimal places.';else if(f&&n>f.balance)e.amt='Insufficient balance. Available: '+fmt(f.balance);else if(f&&f.status!=='active')e.from='Sender account is not active.';
   setErr(e);if(!Object.keys(e).length)setConfirm(true)};
  const run=async()=>{setBusy(true);try{const t=await svc.transfer(user,from,to,n,note.trim());setRes({ok:true,t});setAmt('');setNote('');setTo('');toast('Transfer successful')}catch(e){setRes({ok:false,msg:e.message});toast(e.message,'err')}setBusy(false);setConfirm(false)};
  const others=accts.filter(a=>a.id!==from);
- return <><Title t="Money Transfer" sub={USE_BACKEND?"Move money between FinCore accounts":"Move money between FinCore accounts (simulated)"}/>
+ return <><Title t="Money Transfer" sub="Transfer funds between FinCore accounts"/>
   <Card className="max-w-lg"><div className="space-y-3">
    <Field label="From account" error={err.from}><select className={inp} value={from} onChange={e=>setFrom(e.target.value)}>{accts.map(x=><option key={x.id} value={x.id}>{x.nick} ••{x.no.slice(-4)} — {fmt(x.balance)}</option>)}</select></Field>
    <Field label="Recipient account number" error={err.to}><input className={inp} placeholder="e.g. FCN2002345601" value={to} onChange={e=>setTo(e.target.value)}/></Field>
-   {others.length>0&&<div className="flex flex-wrap gap-2 text-xs">{others.map(o=><button key={o.id} className="rounded-full border border-slate-300 px-2 py-1 dark:border-slate-600" onClick={()=>setTo(o.no)}>My {o.nick}</button>)}{!USE_BACKEND&&<button className="rounded-full border border-slate-300 px-2 py-1 dark:border-slate-600" onClick={()=>setTo('FCN2002345601')}>Demo: Arjun Mehta</button>}</div>}
+   {others.length>0&&<div className="flex flex-wrap gap-2 text-xs">{others.map(o=><button key={o.id} className="rounded-full border border-slate-300 px-2 py-1 dark:border-slate-600" onClick={()=>setTo(o.no)}>My {o.nick}</button>)}<button className="rounded-full border border-slate-300 px-2 py-1 dark:border-slate-600" onClick={()=>setTo('FCN2002345601')}>Demo: Arjun Mehta</button></div>}
    {rec&&recUser&&<p className="text-xs text-emerald-600">Recipient: {recUser.name} ({rec.type})</p>}
    <Field label="Amount (₹)" error={err.amt}><input className={inp} inputMode="decimal" placeholder="0.00" value={amt} onChange={e=>setAmt(e.target.value)}/></Field>
    <Field label="Note (optional)"><input className={inp} maxLength={60} value={note} onChange={e=>setNote(e.target.value)}/></Field>
    <Btn className="w-full" onClick={check}>Review transfer</Btn></div></Card>
-  {confirm&&<Modal title="Confirm transfer" onClose={()=>!busy&&setConfirm(false)}><dl className="space-y-1 text-sm"><div>From: <b>{f.nick} ••{f.no.slice(-4)}</b></div><div>To: <b>{rec&&recUser?recUser.name+' ••'+rec.no.slice(-4):to.trim().toUpperCase()}</b></div><div>Amount: <b>{fmt(n)}</b></div></dl>{!USE_BACKEND&&<p className="mt-2 text-xs text-amber-600">Simulation only — no real money moves.</p>}<div className="mt-4 flex gap-2"><Btn v="out" className="flex-1" disabled={busy} onClick={()=>setConfirm(false)}>Cancel</Btn><Btn busy={busy} className="flex-1" onClick={run}>Confirm</Btn></div></Modal>}
-      {res&&(res.ok?<TxDetail t={res.t} title="✓ Transfer receipt" onClose={()=>setRes(null)}/>:<Modal title="Transfer failed" onClose={()=>setRes(null)}><p className="text-sm text-red-600">{res.msg}</p><Btn className="mt-4 w-full" onClick={()=>setRes(null)}>Close</Btn></Modal>)}</>}
+  {confirm&&<Modal title="Confirm transfer" onClose={()=>!busy&&setConfirm(false)}><dl className="space-y-1 text-sm"><div>From: <b>{f.nick} ••{f.no.slice(-4)}</b></div><div>To: <b>{recUser.name} ••{rec.no.slice(-4)}</b></div><div>Amount: <b>{fmt(n)}</b></div></dl><div className="mt-4 flex gap-2"><Btn v="out" className="flex-1" disabled={busy} onClick={()=>setConfirm(false)}>Cancel</Btn><Btn busy={busy} className="flex-1" onClick={run}>Confirm</Btn></div></Modal>}
+    {res&&(res.ok?<TxDetail t={res.t} title="✓ Transfer receipt" onClose={()=>setRes(null)}/>:<Modal title="Transfer failed" onClose={()=>setRes(null)}><p className="text-sm text-red-600">{res.msg}</p><Btn className="mt-4 w-full" onClick={()=>setRes(null)}>Close</Btn></Modal>)}</>}
 
 /* ---------- History ---------- */
 function Filters({q,setQ,from,setFrom,to,setTo,st,setSt,ty,setTy}){return <div className="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-5"><div className="relative lg:col-span-1"><span className="absolute left-2.5 top-2.5 text-slate-400"><Ic n="search"/></span><input className={inp+' pl-8'} placeholder="Search…" value={q} onChange={e=>setQ(e.target.value)}/></div><input type="date" className={inp} value={from} onChange={e=>setFrom(e.target.value)} aria-label="From date"/><input type="date" className={inp} value={to} onChange={e=>setTo(e.target.value)} aria-label="To date"/><select className={inp} value={st} onChange={e=>setSt(e.target.value)}><option value="">All statuses</option><option>completed</option><option>failed</option><option>pending</option></select><select className={inp} value={ty} onChange={e=>setTy(e.target.value)}><option value="">All types</option><option value="deposit">Deposit</option><option value="withdrawal">Withdrawal</option><option value="transfer">Transfer</option></select></div>}
@@ -385,66 +384,179 @@ function Statements() {
       ? signed(t, new Set(accts.map(a => a.id)))
       : signed(t, new Set([acct]));
 
-  // Download statement as CSV
-  const download = () => {
-    if (err) {
-      toast(err, 'err');
-      return;
-    }
+  // Download statement as PDF
+const download = () => {
+  if (err) {
+    toast(err, 'err');
+    return;
+  }
 
-    if (!rows.length) {
-      toast('No transactions available to export.', 'err');
-      return;
-    }
+  if (!rows.length) {
+    toast('No transactions available to export.', 'err');
+    return;
+  }
 
-    const q = v =>
-      '"' + String(v ?? '').replace(/"/g, '""') + '"';
+  // Initialize PDF in landscape format
+  const jsPDF = window.jspdf?.jsPDF;
 
-    const csv = [
-      'Date,Reference,Type,Description,Credit,Debit,Status (SIMULATED DATA)',
+if (!jsPDF) {
+  console.error("jsPDF failed to load:", window.jspdf);
+  toast("PDF library not loaded. Check your internet connection and refresh.", "err");
+  return;
+}
 
-      ...rows.map(t => {
-        const s = sgn(t);
+const doc = new jsPDF('landscape', 'mm', 'a4');
 
-        return [
-          q(dt(t.date)),
-          q(t.id),
-          q(t.type),
-          q(t.desc),
-          s > 0 ? s.toFixed(2) : '',
-          s < 0 ? (-s).toFixed(2) : '',
-          q(t.status)
-        ].join(',');
-      })
-    ].join('\r\n');
+  const pageWidth = doc.internal.pageSize.getWidth();
 
-    const blob = new Blob(
-      ['\uFEFF' + csv],
-      { type: 'text/csv;charset=utf-8;' }
+  // Calculate statement totals
+  let totalCredit = 0;
+  let totalDebit = 0;
+
+  rows.forEach(t => {
+    const s = sgn(t);
+
+    if (s > 0) totalCredit += s;
+    if (s < 0) totalDebit += Math.abs(s);
+  });
+
+  // PDF Header
+  const drawHeader = () => {
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(20);
+    doc.text('FINCORE NEXUS', 14, 18);
+
+    doc.setFontSize(13);
+    doc.text('BANK ACCOUNT STATEMENT', 14, 27);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+
+    doc.text(`Statement Period: ${from} to ${to}`, 14, 36);
+
+    const accountName =
+      acct === 'all'
+        ? 'All Accounts'
+        : accts.find(a => a.id === acct)?.nick || 'Selected Account';
+
+    doc.text(`Account: ${accountName}`, 14, 43);
+
+    doc.setFont('helvetica', 'bold');
+    doc.text(`Total Credit: INR ${totalCredit.toFixed(2)}`, 180, 36);
+    doc.text(`Total Debit: INR ${totalDebit.toFixed(2)}`, 180, 43);
+
+    doc.line(14, 49, pageWidth - 14, 49);
+
+    // Table headings
+    doc.setFontSize(9);
+
+    doc.text('Date', 14, 57);
+    doc.text('Reference', 48, 57);
+    doc.text('Type', 100, 57);
+    doc.text('Description', 130, 57);
+    doc.text('Credit (INR)', 220, 57);
+    doc.text('Debit (INR)', 260, 57);
+
+    doc.line(14, 60, pageWidth - 14, 60);
+  };
+
+  drawHeader();
+
+  let y = 68;
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8.5);
+
+  rows.forEach(t => {
+    const s = sgn(t);
+
+    const description = doc.splitTextToSize(
+      String(t.desc || '-'),
+      80
     );
 
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
+    const rowHeight = Math.max(7, description.length * 4);
 
-    link.href = url;
-    link.download =
-      `fincore-statement-${from}_to_${to}.csv`;
+    // Add another page if required
+    if (y + rowHeight > 190) {
+      doc.addPage();
+      drawHeader();
 
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
+      y = 68;
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8.5);
+    }
 
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    doc.text(dt(t.date), 14, y);
+    doc.text(String(t.id).slice(0, 22), 48, y);
+    doc.text(String(t.type).toUpperCase(), 100, y);
 
-    toast('Statement downloaded successfully!');
-  };
+    doc.text(description, 130, y);
+
+    if (s > 0) {
+      doc.text(s.toFixed(2), 220, y);
+    }
+
+    if (s < 0) {
+      doc.text(Math.abs(s).toFixed(2), 260, y);
+    }
+
+    y += rowHeight + 3;
+
+    doc.setDrawColor(220, 220, 220);
+    doc.line(14, y - 1, pageWidth - 14, y - 1);
+  });
+
+  // Footer on every page
+  const pageCount = doc.internal.getNumberOfPages();
+
+  for (let i = 1; i <= pageCount; i++) {
+    doc.setPage(i);
+
+    doc.setFontSize(8);
+    doc.setFont('helvetica', 'italic');
+
+    doc.text(
+      'FINCORE Nexus - Computer generated statement.',
+      14,
+      202
+    );
+
+    doc.text(
+      `Page ${i} of ${pageCount}`,
+      pageWidth - 35,
+      202
+    );
+  }
+
+  // Download PDF
+  // Generate PDF as a downloadable Blob
+const pdfBlob = doc.output('blob');
+
+const pdfUrl = URL.createObjectURL(pdfBlob);
+
+const link = document.createElement('a');
+link.href = pdfUrl;
+link.download = `FINCORE-Statement-${from}-to-${to}.pdf`;
+
+document.body.appendChild(link);
+link.click();
+document.body.removeChild(link);
+
+// Release temporary URL
+setTimeout(() => {
+  URL.revokeObjectURL(pdfUrl);
+}, 1000);
+
+toast('PDF statement downloaded successfully!');
+};
 
   // Statements page UI
   return (
     <>
       <Title
         t="Statements"
-        sub="Select a range and export as CSV"
+        sub="Select a date range and download your bank statement as PDF"
       />
 
       <Card>
@@ -486,13 +598,13 @@ function Statements() {
 
           <div className="flex items-end">
             <Btn
-              className="w-full"
-              disabled={!rows.length || !!err}
-              onClick={download}
-            >
-              <Ic n="dl" />
-              Download CSV
-            </Btn>
+  className="w-full"
+  disabled={!!err}
+  onClick={download}
+>
+  <Ic n="dl" />
+  Download PDF
+</Btn>
           </div>
 
         </div>
@@ -524,6 +636,107 @@ function Statements() {
     </>
   );
 }
+
+/* ---------- Milestone 2: frontend-only loan and KYC experience ---------- */
+function emiFor(principal,annualRate,months){const r=annualRate/1200;if(!principal||!months)return 0;if(!r)return principal/months;const x=Math.pow(1+r,months);return principal*r*x/(x-1)}
+function CreditScore(){const {user}=useApp();const seedScore=String(user.id).split('').reduce((a,c)=>a+c.charCodeAt(0),0);const score=690+(seedScore%81);const band=score>=750?'Excellent':score>=700?'Good':'Fair';return <Card><div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold">Credit score</h2><p className="text-xs text-slate-500">Illustrative demo score — not obtained from a credit bureau</p></div><Badge s="demo"/></div><div className="mt-4 flex items-center gap-5"><div className="grid h-24 w-24 place-items-center rounded-full border-8 border-blue-200 text-center dark:border-blue-900"><div><div className="text-2xl font-bold">{score}</div><div className="text-[10px] text-slate-500">/ 900</div></div></div><div><div className="text-lg font-semibold">{band}</div><p className="mt-2 text-xs text-slate-500">This sample score is for interface demonstration only. It is not a lending decision.</p></div></div><div className="mt-4 grid gap-2 sm:grid-cols-3">{[['Payment history','Good'],['Credit utilisation','Moderate'],['Credit age','Building']].map(([a,b])=><div className="rounded-lg bg-slate-50 p-3 text-sm dark:bg-navy-950"><div className="text-xs text-slate-500">{a}</div><b>{b}</b></div>)}</div></Card>}
+function Loans(){
+ const {db,user,svc,toast}=useApp();const mine=db.loans.filter(x=>x.userId===user.id);const [form,setForm]=useState({type:'Personal',amount:'300000',tenure:'36',income:'50000',purpose:''});const [busy,setBusy]=useState(false);const [show,setShow]=useState(false);const [expanded,setExpanded]=useState({});
+ const amount=Number(form.amount)||0,months=Number(form.tenure)||0,income=Number(form.income)||0;const rate=({Personal:12.5,Education:8.5,Home:8.25,Business:10.5})[form.type];const emi=emiFor(amount,rate,months);const ratio=income?emi/income:1;const eligible=amount>=10000&&amount<=5000000&&months>=6&&months<=360&&income>=15000&&ratio<=.5;
+ const submit=async e=>{e.preventDefault();if(!form.purpose.trim()){toast('Please enter the loan purpose.','err');return}if(!eligible){toast('The entered details do not meet the demo eligibility guidelines.','err');return}setBusy(true);try{await svc.applyLoan(user,form);toast('Loan application submitted successfully.');setShow(false);setForm({...form,purpose:''})}catch(x){toast(x.message,'err')}setBusy(false)};
+ const pay=async loan=>{try{await svc.payLoanEmi(user,loan.id);toast('Demo EMI payment recorded.')}catch(e){toast(e.message,'err')}};
+ return <><Title t="Loans & EMI" sub="Explore loan options, track disbursement and manage repayments."/><div className="grid gap-4 sm:grid-cols-3"><Card><div className="text-sm text-slate-500">My applications</div><div className="mt-1 text-2xl font-bold">{mine.length}</div></Card><Card><div className="text-sm text-slate-500">Awaiting review</div><div className="mt-1 text-2xl font-bold text-amber-600">{mine.filter(x=>x.status==='pending').length}</div></Card><Card><div className="text-sm text-slate-500">Active disbursed loans</div><div className="mt-1 text-2xl font-bold text-emerald-600">{mine.filter(x=>x.disbursementStatus==='disbursed'&&x.paidInstallments?.length<x.tenure).length}</div></Card></div>
+ <div className="mt-4"><CreditScore/></div>
+ <div className="mt-4 grid gap-4 lg:grid-cols-5"><Card className="lg:col-span-3"><div className="flex items-center justify-between gap-3"><div><h2 className="font-semibold">Loan EMI calculator</h2><p className="text-xs text-slate-500">Indicative estimates for demonstration only</p></div><span className="rounded-full bg-blue-50 px-3 py-1 text-xs text-blue-700 dark:bg-blue-900/30 dark:text-blue-300">{rate}% p.a.</span></div><div className="mt-4 grid gap-3 sm:grid-cols-2"><Field label="Loan type"><select className={inp} value={form.type} onChange={e=>setForm({...form,type:e.target.value})}>{['Personal','Home','Education','Business'].map(x=><option key={x}>{x}</option>)}</select></Field><Field label="Loan amount (₹)"><input className={inp} type="number" min="10000" max="5000000" value={form.amount} onChange={e=>setForm({...form,amount:e.target.value})}/></Field><Field label="Tenure (months)"><input className={inp} type="number" min="6" max="360" value={form.tenure} onChange={e=>setForm({...form,tenure:e.target.value})}/></Field><Field label="Monthly income (₹)"><input className={inp} type="number" min="0" value={form.income} onChange={e=>setForm({...form,income:e.target.value})}/></Field></div><div className="mt-4 rounded-xl bg-navy-900 p-5 text-white"><div className="text-sm text-blue-200">Estimated monthly EMI</div><div className="mt-1 text-3xl font-bold">{fmt(emi)}</div><div className="mt-3 grid grid-cols-2 gap-3 text-sm"><div><div className="text-blue-200">Total interest</div><b>{fmt(Math.max(0,emi*months-amount))}</b></div><div><div className="text-blue-200">Total repayment</div><b>{fmt(emi*months)}</b></div></div></div><p className="mt-3 text-xs text-slate-500">Demo eligibility indicator: {eligible?<span className="font-semibold text-emerald-600">Likely eligible based on entered details</span>:<span className="font-semibold text-amber-600">Review amount, tenure, income and EMI-to-income ratio</span>}. Final eligibility is determined by the bank.</p><Btn className="mt-4" onClick={()=>setShow(true)}>Apply for this loan</Btn></Card><Card className="lg:col-span-2"><h2 className="font-semibold">Loan process</h2><div className="mt-4 space-y-4">{[['01','Submit application','Choose a loan and provide basic details.'],['02','Credit assessment','Your application is reviewed by the bank.'],['03','Approval and disbursement','Track approval and disbursement status.'],['04','EMI repayment','View the reducing-balance schedule and demo payments.']].map(([n,t,d])=><div className="flex gap-3" key={n}><span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-blue-100 text-sm font-bold text-navy-700 dark:bg-navy-700 dark:text-blue-200">{n}</span><div><b className="text-sm">{t}</b><p className="text-xs text-slate-500">{d}</p></div></div>)}</div></Card></div>
+ <Card className="mt-4"><h2 className="mb-3 font-semibold">My loan applications & repayment management</h2><Table cols={['Reference','Loan type','Amount','Tenure','Estimated EMI','Applied on','Application','Disbursement']} rows={mine.map(x=>[x.id,x.type,fmt(x.amount),x.tenure+' months',fmt(emiFor(x.amount,x.rate,x.tenure)),dt(x.createdAt),<Badge s={x.status}/>,<Badge s={x.disbursementStatus||'not_disbursed'}/>])}/>{mine.map(x=>{const schedule=x.disbursementStatus==='disbursed'?buildEmiSchedule(x):[];const paid=x.paidInstallments||[];const next=schedule.find(z=>!paid.includes(z.number));return <div key={x.id} className="mt-4 rounded-xl border border-slate-200 p-4 dark:border-slate-700"><div className="flex flex-wrap items-center justify-between gap-2"><div><b>{x.id} · {x.type} loan</b><p className="text-xs text-slate-500">{x.status==='rejected'?'Reason: '+(x.reviewNote||'No reason provided'):x.disbursementStatus==='disbursed'?'Disbursed '+dt(x.disbursedAt):x.status==='approved'?'Approved — awaiting disbursement':'Application '+x.status}</p></div>{x.disbursementStatus==='disbursed'&&<Btn v="out" className="!py-1.5" onClick={()=>setExpanded(v=>({...v,[x.id]:!v[x.id]}))}>{expanded[x.id]?'Hide':'View'} EMI schedule</Btn>}</div>{x.status==='approved'&&x.disbursementStatus!=='disbursed'&&<p className="mt-2 text-sm text-amber-600">Your loan is approved and waiting for the bank's disbursement action.</p>}{x.disbursementStatus==='disbursed'&&<><div className="mt-3 grid gap-2 sm:grid-cols-4"><div><div className="text-xs text-slate-500">Monthly EMI</div><b>{fmt(emiFor(x.amount,x.rate,x.tenure))}</b></div><div><div className="text-xs text-slate-500">Paid instalments</div><b>{paid.length} / {x.tenure}</b></div><div><div className="text-xs text-slate-500">Outstanding principal</div><b>{fmt(x.outstandingPrincipal??x.amount)}</b></div><div><div className="text-xs text-slate-500">Next due date</div><b>{next?new Date(next.dueDate).toLocaleDateString('en-IN'):'Completed'}</b></div></div><div className="mt-3 flex flex-wrap gap-2"><Btn disabled={!next} onClick={()=>pay(x)}>Pay next EMI · {next?fmt(next.emi):'Completed'}</Btn><span className="self-center text-xs text-slate-500">Demo payment only — no bank account is charged.</span></div>{expanded[x.id]&&<div className="mt-4"><h3 className="mb-2 font-semibold">Full EMI repayment schedule</h3><Table cols={['#','Due date','Opening balance','Principal','Interest','EMI','Closing balance','Status']} rows={schedule.map(z=>[z.number,new Date(z.dueDate).toLocaleDateString('en-IN'),fmt(z.openingBalance),fmt(z.principal),fmt(z.interest),fmt(z.emi),fmt(z.closingBalance),<Badge s={paid.includes(z.number)?'completed':'pending'}/>])}/></div>}{(x.payments||[]).length>0&&<div className="mt-3 text-xs text-slate-500">Payment history: {(x.payments||[]).map(v=>`${v.reference} · EMI ${v.number} · ${dt(v.paidAt)}`).join(' | ')}</div>}</>}</div>})}</Card>
+ {show&&<Modal title="Submit loan application" onClose={()=>setShow(false)}><form className="space-y-3" onSubmit={submit}><p className="text-sm text-slate-500">{form.type} loan · {fmt(amount)} · {months} months</p><Field label="Loan purpose"><textarea required rows="3" className={inp} value={form.purpose} onChange={e=>setForm({...form,purpose:e.target.value})} placeholder="Briefly explain why you need this loan"/></Field><div className="flex justify-end gap-2"><Btn type="button" v="out" onClick={()=>setShow(false)}>Cancel</Btn><Btn busy={busy}>Submit application</Btn></div></form></Modal>}</>}
+function ALoans(){const {db,user,svc,toast}=useApp();const [note,setNote]=useState({});const rows=db.loans.map(x=>[x.customerName,x.id,x.type,fmt(x.amount),fmt(x.income),x.tenure+' months',dt(x.createdAt),<Badge s={x.status}/>,x.status==='pending'?<div className="flex gap-1"><Btn className="!px-2 !py-1 !text-xs" onClick={async()=>{await svc.reviewLoan(user,x.id,'approved',note[x.id]);toast('Loan approved (demo).')}}>Approve</Btn><Btn v="dng" className="!px-2 !py-1 !text-xs" onClick={async()=>{await svc.reviewLoan(user,x.id,'rejected',note[x.id]);toast('Loan rejected (demo).')}}>Reject</Btn></div>:x.status==='approved'&&x.disbursementStatus!=='disbursed'?<Btn className="!px-2 !py-1 !text-xs" onClick={async()=>{await svc.disburseLoan(user,x.id);toast('Loan marked as disbursed (demo).')}}>Mark disbursed</Btn>:x.reviewNote||x.disbursementStatus||'—']);return <><Title t="Loan Applications" sub={`${db.loans.length} application(s) · approval and disbursement simulation`}/><Card><Table cols={['Applicant','Reference','Type','Amount','Monthly income','Tenure','Applied','Status','Action / note']} rows={rows}/>{db.loans.filter(x=>x.status==='pending').map(x=><div className="mt-3" key={x.id}><Field label={'Review note — '+x.customerName}><input className={inp} placeholder="Optional note" value={note[x.id]||''} onChange={e=>setNote({...note,[x.id]:e.target.value})}/></Field></div>)}</Card></>}
+
+/* ---------- MILESTONE 3: PAYMENT & TRANSFER DEMO ---------- */
+let demoPayments = [
+ {id:'PAY-DEMO-1001',userId:'u1',method:'UPI',beneficiary:'Arya Stark',account:'FCN3003456701',amount:1250,status:'completed',risk:12,date:new Date(Date.now()-86400000).toISOString(),settlement:'settled',saga:['Debit','Credit','Notify']},
+ {id:'PAY-DEMO-1002',userId:'u2',method:'NEFT',beneficiary:'John Snow',account:'FCN1001234501',amount:18500,status:'flagged',risk:87,date:new Date(Date.now()-3600000).toISOString(),settlement:'on_hold',saga:['Debit','Credit','Notify']}
+];
+let demoBeneficiaries = [
+ {id:'BEN-001',userId:'u1',name:'Arya Stark',account:'FCN3003456701',bank:'FinCore Nexus',method:'UPI',verified:true},
+ {id:'BEN-002',userId:'u1',name:'Rahul Sharma',account:'rahul@demo',bank:'Demo Bank',method:'UPI',verified:false}
+];
+function CustomerPayments(){
+ const {user,toast}=useApp();const [method,setMethod]=useState('UPI');const [benef,setBenef]=useState('');const [amount,setAmount]=useState('');const [note,setNote]=useState('');const [confirm,setConfirm]=useState(false);const [busy,setBusy]=useState(false);const [result,setResult]=useState(null);
+ const [showAdd,setShowAdd]=useState(false);const [bform,setBform]=useState({name:'',account:'',bank:'',method:'UPI'});const [receipt,setReceipt]=useState(null);
+ const mine=demoBeneficiaries.filter(x=>x.userId===user.id);const history=demoPayments.filter(x=>x.userId===user.id);
+ const selected=mine.find(x=>x.id===benef);
+ const submit=()=>{if(!selected){toast('Select a beneficiary.','err');return}if(!Number.isFinite(+amount)||+amount<=0){toast('Enter a valid amount.','err');return}if(+amount>500000){toast('Demo limit is ₹5,00,000.','err');return}setConfirm(true)};
+ const pay=async()=>{setBusy(true);await delay(500);const risk=Math.min(99,Math.round((+amount>50000?45:8)+(selected.verified?0:25)+Math.random()*15));const p={id:'PAY-'+Date.now(),userId:user.id,method,beneficiary:selected.name,account:selected.account,amount:+amount,status:risk>=70?'flagged':'completed',risk,date:new Date().toISOString(),settlement:risk>=70?'on_hold':'settled',saga:['Debit','Credit','Notify']};demoPayments.unshift(p);setBusy(false);setConfirm(false);setResult(p);setAmount('');setNote('');toast(p.status==='flagged'?'Payment flagged for risk review.':'Payment completed successfully.');};
+ const addBenef=()=>{if(!bform.name.trim()||!bform.account.trim()){toast('Enter beneficiary name and account / UPI ID.','err');return}demoBeneficiaries.push({id:'BEN-'+Date.now(),userId:user.id,...bform,verified:false});setBform({name:'',account:'',bank:'',method:'UPI'});setShowAdd(false);toast('Beneficiary added (unverified demo).')};
+ const download=p=>{
+  const jsPDF=window.jspdf?.jsPDF;
+  if(!jsPDF){toast('PDF library is unavailable. Check your internet connection and refresh.','err');return;}
+  const doc=new jsPDF('portrait','mm','a4');
+  const pageWidth=doc.internal.pageSize.getWidth();
+  doc.setFillColor(15,39,78);doc.rect(0,0,pageWidth,43,'F');
+  doc.setTextColor(255,255,255);doc.setFont('helvetica','bold');doc.setFontSize(19);
+  doc.text('FINCORE NEXUS',15,19);
+  doc.setFontSize(11);doc.text('PAYMENT RECEIPT',15,29);
+  doc.setFont('helvetica','normal');doc.setFontSize(9);
+  doc.text('DIGITAL BANKING PLATFORM',15,36);
+  doc.setTextColor(30,41,59);doc.setFontSize(10);
+  const details=[
+   ['Transaction reference',p.id],['Payment method',p.method],['Beneficiary',p.beneficiary],
+   ['Account / UPI ID',p.account],['Amount','INR '+Number(p.amount).toFixed(2)],
+   ['Status',String(p.status).toUpperCase()],['Risk score',String(p.risk)+'/100'],['Date and time',dt(p.date)]
+  ];
+  let y=61;
+  details.forEach(([label,value])=>{
+   doc.setFont('helvetica','bold');doc.setTextColor(100,116,139);doc.text(label,15,y);
+   doc.setFont('helvetica','normal');doc.setTextColor(15,23,42);
+   const lines=doc.splitTextToSize(String(value||'-'),pageWidth-75);
+   doc.text(lines,75,y);y+=Math.max(12,lines.length*5+5);
+   doc.setDrawColor(226,232,240);doc.line(15,y-5,pageWidth-15,y-5);
+  });
+  y+=8;doc.setTextColor(100,116,139);doc.setFont('helvetica','normal');doc.setFontSize(8);
+  doc.text('FINCORE Nexus | Payment Receipt',15,285);
+  doc.save(`${p.id}-receipt.pdf`);
+  toast('PDF payment receipt downloaded successfully!');
+ };
+ return <><Title t="Payments & Transfers" sub="IMPS, NEFT and UPI payments."/>
+ 
+ <div className="grid gap-4 lg:grid-cols-5"><Card className="lg:col-span-3"><h2 className="font-semibold">Make a payment</h2><div className="mt-3 grid grid-cols-3 gap-2">{['IMPS','NEFT','UPI'].map(m=><button key={m} onClick={()=>setMethod(m)} className={cx('rounded-lg border p-3 text-sm font-semibold',method===m?'border-blue-600 bg-blue-50 text-blue-700 dark:bg-blue-900/30':'border-slate-200 dark:border-slate-700')}>{m}</button>)}</div>
+ <div className="mt-4 space-y-3"><Field label="Payment method"><div className="text-sm text-slate-500">{method==='IMPS'?'Immediate demo transfer':method==='NEFT'?'Batch settlement simulation':'UPI ID / address simulation'}</div></Field>
+ <Field label="Beneficiary"><select className={inp} value={benef} onChange={e=>setBenef(e.target.value)}><option value="">Select beneficiary</option>{mine.map(b=><option key={b.id} value={b.id}>{b.name} — {b.account} {b.verified?'✓ verified':'· pending verification'}</option>)}</select></Field>
+ {selected&&<div className="text-xs text-slate-500">{selected.bank} · <Badge s={selected.verified?'verified':'pending verification'}/></div>}
+ <Field label="Amount (₹)"><input className={inp} type="number" min="1" step="0.01" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="Enter amount"/></Field>
+ <Field label="Payment note (optional)"><input className={inp} value={note} onChange={e=>setNote(e.target.value)} maxLength="80" placeholder="Purpose of payment"/></Field>
+ <Btn className="w-full" onClick={submit}>Review payment</Btn></div></Card>
+ <Card><div className="flex items-center justify-between"><h2 className="font-semibold">Beneficiaries</h2><Btn className="!px-2 !py-1 !text-xs" onClick={()=>setShowAdd(true)}>+ Add</Btn></div><div className="mt-3 space-y-3">{mine.map(b=><div key={b.id} className="rounded-lg border p-3 text-sm dark:border-slate-700"><div className="font-medium">{b.name}</div><div className="break-all text-xs text-slate-500">{b.account}</div><div className="mt-1 flex items-center justify-between"><Badge s={b.verified?'verified':'pending'}/><div className="flex gap-2"><button className="text-xs text-blue-600" onClick={()=>{const name=prompt('Beneficiary name',b.name);if(name===null)return;const account=prompt('Account number / UPI ID',b.account);if(account===null)return;b.name=name.trim()||b.name;b.account=account.trim()||b.account;b.verified=false;toast('Beneficiary updated; verification reset to pending.')}}>Edit</button><button className="text-xs text-red-600" onClick={()=>{demoBeneficiaries=demoBeneficiaries.filter(x=>x.id!==b.id);toast('Beneficiary removed.')}}>Delete</button></div></div></div>)}{!mine.length&&<p className="text-sm text-slate-500">No beneficiaries added.</p>}</div></Card></div>
+ <div className="mt-4"><Card><h2 className="mb-3 font-semibold">Payment history</h2><Table cols={['Reference','Date','Method','Beneficiary','Amount','Risk','Status','Receipt']} rows={history.map(p=>[p.id,dt(p.date),p.method,p.beneficiary,fmt(p.amount),p.risk+'%',<Badge s={p.status}/>,<Btn v="out" className="!px-2 !py-1 !text-xs" onClick={()=>download(p)}>Receipt</Btn>])}/></Card></div>
+ {confirm&&<Modal title="Confirm payment" onClose={()=>!busy&&setConfirm(false)}><p className="text-sm">Send <b>{fmt(+amount)}</b> via <b>{method}</b> to <b>{selected?.name}</b>?</p><div className="mt-4 flex gap-2"><Btn v="out" className="flex-1" onClick={()=>setConfirm(false)}>Cancel</Btn><Btn busy={busy} className="flex-1" onClick={pay}>Confirm payment</Btn></div></Modal>}
+ {showAdd&&<Modal title="Add beneficiary" onClose={()=>setShowAdd(false)}><div className="space-y-3"><Field label="Beneficiary name"><input className={inp} value={bform.name} onChange={e=>setBform({...bform,name:e.target.value})}/></Field><Field label="Account number / UPI ID"><input className={inp} value={bform.account} onChange={e=>setBform({...bform,account:e.target.value})}/></Field><Field label="Bank"><input className={inp} value={bform.bank} onChange={e=>setBform({...bform,bank:e.target.value})}/></Field><Field label="Preferred method"><select className={inp} value={bform.method} onChange={e=>setBform({...bform,method:e.target.value})}><option>UPI</option><option>IMPS</option><option>NEFT</option></select></Field><Btn className="w-full" onClick={addBenef}>Save beneficiary</Btn></div></Modal>}
+ {result&&<Modal title="Payment result" onClose={()=>setResult(null)}><div className="space-y-2 text-sm"><div className="text-lg font-semibold">{result.status==='flagged'?'Payment held for review':'Payment completed'}</div><p>Reference: <b>{result.id}</b></p><p>Amount: <b>{fmt(result.amount)}</b></p><p>Status: <Badge s={result.status}/></p><p>Risk score: {result.risk}/100</p><div className="rounded-lg bg-slate-50 p-3 dark:bg-navy-950"><b className="text-xs">Saga workflow</b><div className="mt-2 flex items-center gap-2 text-xs">{['Debit','Credit','Notify'].map((s,i)=><React.Fragment key={s}><span className="rounded bg-emerald-100 px-2 py-1 text-emerald-800">{s} ✓</span>{i<2&&<span>→</span>}</React.Fragment>)}</div></div><Btn className="w-full" onClick={()=>download(result)}>Download receipt</Btn></div></Modal>}</>;
+}
+function AdminPayments(){
+ const {toast}=useApp();const [filter,setFilter]=useState('all');const [selected,setSelected]=useState(null);const rows=demoPayments.filter(p=>filter==='all'||p.method===filter);
+ const act=(p,status)=>{p.status=status;p.settlement=status==='completed'?'settled':status==='rejected'?'failed':'on_hold';setSelected({...p});toast('Demo payment updated: '+status)};
+ return <><Title t="Payment Operations" sub="Payment monitoring, fraud review, settlement and reconciliation (demo data)."/>
+ <div className="mb-4 grid gap-3 sm:grid-cols-4"><Stat l="Payments" v={demoPayments.length}/><Stat l="Completed" v={demoPayments.filter(p=>p.status==='completed').length}/><Stat l="Flagged" v={demoPayments.filter(p=>p.status==='flagged'||p.status==='held').length}/><Stat l="Settled" v={demoPayments.filter(p=>p.settlement==='settled').length}/></div>
+ <Card><div className="mb-3 flex flex-wrap items-center justify-between gap-2"><h2 className="font-semibold">Payment monitoring & fraud review</h2><select className={inp+' max-w-40'} value={filter} onChange={e=>setFilter(e.target.value)}><option value="all">All methods</option><option>IMPS</option><option>NEFT</option><option>UPI</option></select></div>
+ <Table cols={['Reference','Method','Beneficiary','Amount','Risk score','Status','Settlement','Review']} rows={rows.map(p=>[p.id,p.method,p.beneficiary,fmt(p.amount),<span className={p.risk>=70?'font-semibold text-red-600':'text-emerald-600'}>{p.risk}/100</span>,<Badge s={p.status}/>,<Badge s={p.settlement}/>,<div className="flex flex-wrap gap-1"><Btn className="!px-2 !py-1 !text-xs" onClick={()=>act(p,'completed')}>Approve</Btn><Btn v="out" className="!px-2 !py-1 !text-xs" onClick={()=>act(p,'held')}>Hold</Btn><Btn v="dng" className="!px-2 !py-1 !text-xs" onClick={()=>act(p,'rejected')}>Reject</Btn></div>])}/></Card>
+ <div className="mt-4 grid gap-4 lg:grid-cols-2"><Card><h2 className="font-semibold">Settlement management</h2><p className="mt-1 text-sm text-slate-500">Demo settlement states: settled, on hold, failed.</p><div className="mt-3 space-y-2">{demoPayments.map(p=><div key={p.id} className="flex justify-between gap-3 border-b py-2 text-sm dark:border-slate-700"><span>{p.id} · {p.method}</span><Badge s={p.settlement}/></div>)}</div></Card><Card><h2 className="font-semibold">Saga execution</h2><p className="mt-1 text-sm text-slate-500">Illustrative payment orchestration sequence.</p><div className="mt-5 flex flex-wrap items-center gap-2">{['Debit','Credit','Notify'].map((s,i)=><React.Fragment key={s}><div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm font-semibold text-blue-800">{i+1}. {s}</div>{i<2&&<span>→</span>}</React.Fragment>)}</div></Card></div></>;
+}
+
+function KYC(){const {user,db,svc,toast}=useApp();const saved=db.kyc[user.id]||{};const [files,setFiles]=useState({});const [mobile,setMobile]=useState(user.phone||'');const [otp,setOtp]=useState('');const [sent,setSent]=useState(false);const [verified,setVerified]=useState(false);const [busy,setBusy]=useState(false);const choose=(key)=>e=>{const f=e.target.files?.[0];if(f)setFiles(v=>({...v,[key]:f.name,[key.replace('File','Doc')]:f}))};const submit=async()=>{if(!(files.panFile||saved.panFile)||!(files.addressFile||saved.addressFile)){toast('Select both identity and address proof documents.','err');return}if(!verified&&saved.otpVerified!=='yes'){toast('Verify the demo mobile OTP before submitting.','err');return}setBusy(true);await svc.saveKyc(user,{...files,mobile,otpVerified:'yes',status:'submitted'});setBusy(false);toast('KYC application submitted for admin review.');};const status=saved.status||'not_submitted';return <><Title t="KYC Verification" sub="Submit identity and address proof and track the review decision."/><div className="grid gap-4 lg:grid-cols-2"><Card><h2 className="mb-3 font-semibold">Identity documents</h2><div className="space-y-3"><Field label="PAN card (sample file)"><input className={inp} type="file" accept="image/*,.pdf" onChange={choose('panFile')}/><small className="text-slate-500">{files.panFile||saved.panFile||'No file selected'}</small></Field><Field label="Address proof (sample file)"><input className={inp} type="file" accept="image/*,.pdf" onChange={choose('addressFile')}/><small className="text-slate-500">{files.addressFile||saved.addressFile||'No file selected'}</small></Field><Field label="Registered mobile number"><input className={inp} maxLength="10" value={mobile} onChange={e=>setMobile(e.target.value)}/></Field><div className="flex gap-2"><Btn v="out" onClick={()=>{setSent(true);setVerified(false);toast('Demo OTP sent: use 123456.')}}>Send demo OTP</Btn>{sent&&<span className="self-center text-xs text-emerald-600">OTP sent (demo)</span>}</div>{sent&&<div className="flex gap-2"><input className={inp} maxLength="6" placeholder="Enter 123456" value={otp} onChange={e=>setOtp(e.target.value)}/><Btn v="out" onClick={()=>{setVerified(otp==='123456');toast(otp==='123456'?'Mobile verified (demo).':'Invalid demo OTP.',otp==='123456'?'ok':'err')}}>Verify</Btn></div>}<div className="text-xs">Mobile verification: <Badge s={verified||saved.otpVerified==='yes'?'verified':'pending'}/></div><Btn busy={busy} onClick={submit}>Submit KYC for review</Btn></div></Card><Card><h2 className="font-semibold">Verification status</h2><div className="mt-3 flex items-center justify-between border-b py-3 dark:border-slate-700"><span className="text-sm">Overall KYC</span><Badge s={status}/></div><div className="space-y-3 py-3 text-sm"><p>✓ Profile information</p><p>{saved.panFile||files.panFile?'✓':'○'} PAN document selected</p><p>{saved.addressFile||files.addressFile?'✓':'○'} Address document selected</p><p>{saved.otpVerified==='yes'||verified?'✓':'○'} Mobile OTP verification</p></div>{saved.reviewNote&&<div className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800 dark:bg-amber-900/20 dark:text-amber-200">Admin review note: {saved.reviewNote}</div>}{status==='rejected'&&<p className="mt-2 text-xs text-red-600">Your application was rejected. Update your documents and resubmit.</p>}</Card></div></>}
+function KycDocViewer({doc}){
+ const [url,setUrl]=useState('');
+ useEffect(()=>{const u=URL.createObjectURL(doc);setUrl(u);return()=>URL.revokeObjectURL(u)},[doc]);
+ const isImg=(doc.type||'').startsWith('image/'),isPdf=doc.type==='application/pdf'||/\.pdf$/i.test(doc.name);
+ const kb=doc.size<1048576?(doc.size/1024).toFixed(1)+' KB':(doc.size/1048576).toFixed(2)+' MB';
+ return <div className="space-y-3"><div className="flex flex-wrap items-center justify-between gap-2 text-sm"><div><b>{doc.name}</b><span className="ml-2 text-xs text-slate-500">{doc.type||'unknown type'} · {kb}</span></div><span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700 dark:bg-slate-700 dark:text-slate-200">View only</span></div>
+ <div className="overflow-auto rounded-lg border border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-navy-950" style={{height:'65vh'}} onContextMenu={e=>e.preventDefault()}>
+  {!url?null:isImg?<img src={url} alt={doc.name} draggable={false} className="mx-auto max-h-full max-w-full select-none object-contain"/>
+  :isPdf?<iframe title={doc.name} src={url+'#toolbar=0&navpanes=0'} className="h-full w-full"/>
+  :<p className="py-16 text-center text-sm text-slate-500">Preview is not available for this file type. Ask the customer to upload an image or PDF.</p>}
+ </div></div>}
+function AKYC(){const {db,user,svc,toast}=useApp();const [notes,setNotes]=useState({});const [viewing,setViewing]=useState(null);const openDoc=(userId,u,label,doc)=>{setViewing({title:label+' — '+u.name,doc});svc.viewKycDoc(user,userId,label,doc.name)};const entries=Object.entries(db.kyc).map(([userId,k])=>({userId,k,u:db.users.find(x=>x.id===userId)})).filter(x=>x.u);const pending=entries.filter(x=>x.k.status==='submitted'||x.k.status==='under_review');const act=async(id,status)=>{try{await svc.reviewKyc(user,id,status,notes[id]);toast('KYC '+status+' (demo).')}catch(e){toast(e.message,'err')}};return <><Title t="KYC Verification Dashboard" sub={`${entries.length} application(s) · ${pending.length} awaiting review`}/><div className="mb-4 grid gap-3 sm:grid-cols-3"><Stat l="Total applications" v={entries.length}/><Stat l="Awaiting review" v={pending.length}/><Stat l="Approved" v={entries.filter(x=>x.k.status==='approved').length}/></div><div className="space-y-4">{entries.length?entries.map(({userId,k,u})=><Card key={userId}><div className="flex flex-wrap items-start justify-between gap-2"><div><h2 className="font-semibold">{u.name}</h2><p className="text-xs text-slate-500">{u.email} · {u.phone} · {k.applicationId||'KYC-'+userId}</p></div><Badge s={k.status||'draft'}/></div><div className="mt-4 grid gap-3 sm:grid-cols-2"><div className="rounded-lg bg-slate-50 p-3 text-sm dark:bg-navy-950"><div className="text-xs text-slate-500">PAN document</div><div className="flex items-center justify-between gap-2"><b className="break-all">{k.panFile||'Not provided'}</b>{k.panDoc?<Btn v="out" className="!px-2 !py-1 !text-xs" onClick={()=>openDoc(userId,u,'PAN document',k.panDoc)}>View</Btn>:k.panFile?<span className="text-xs text-slate-500">File not available</span>:null}</div></div><div className="rounded-lg bg-slate-50 p-3 text-sm dark:bg-navy-950"><div className="text-xs text-slate-500">Address proof</div><div className="flex items-center justify-between gap-2"><b className="break-all">{k.addressFile||'Not provided'}</b>{k.addressDoc?<Btn v="out" className="!px-2 !py-1 !text-xs" onClick={()=>openDoc(userId,u,'Address proof',k.addressDoc)}>View</Btn>:k.addressFile?<span className="text-xs text-slate-500">File not available</span>:null}</div></div><div className="text-sm"><span className="text-slate-500">Mobile:</span> {k.mobile||'—'} · <Badge s={k.otpVerified==='yes'?'verified':'pending'}/></div><div className="text-xs text-slate-500">Submitted / updated: {k.updatedAt?dt(k.updatedAt):'—'}</div></div>{(k.status==='submitted'||k.status==='under_review')&&<div className="mt-3 space-y-2"><Field label="Review note / rejection reason"><input className={inp} value={notes[userId]||''} onChange={e=>setNotes(v=>({...v,[userId]:e.target.value}))} placeholder="Enter note; required when rejecting"/></Field><div className="flex gap-2"><Btn onClick={()=>act(userId,'approved')}>Approve KYC</Btn><Btn v="dng" onClick={()=>{if(!notes[userId]?.trim()){toast('Enter a rejection reason first.','err');return}act(userId,'rejected')}}>Reject KYC</Btn></div></div>}{k.reviewNote&&<p className="mt-3 text-sm text-slate-500">Previous review note: {k.reviewNote}</p>}</Card>):<Card><p className="py-8 text-center text-sm text-slate-500">No KYC applications submitted yet. Customer submissions will appear here.</p></Card>}</div>{viewing&&<Modal wide title={viewing.title} onClose={()=>setViewing(null)}><KycDocViewer doc={viewing.doc}/></Modal>}</>}
 
 /* ---------- Profile ---------- */
 
